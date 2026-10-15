@@ -1,0 +1,64 @@
+{
+  "name": "pi-cpp-lsp",
+  "version": "1.0.0",
+  "description": "Pi extension for C/C++ development with clangd integration, auto-formatting, linting, and compilation checks",
+  "author": {
+    "name": "Martin Juul Christiansen",
+    "email": "code@juul.xyz"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/martin-juul/pi-cpp-lsp.git"
+  },
+  "homepage": "https://github.com/martin-juul/pi-cpp-lsp#readme",
+  "bugs": {
+    "url": "https://github.com/martin-juul/pi-cpp-lsp/issues"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "c",
+    "cpp",
+    "c++",
+    "clangd",
+    "llvm",
+    "lsp",
+    "pi-package",
+    "clang-tidy",
+    "clang-format",
+    "cmake"
+  ],
+  "type": "module",
+  "files": [
+    "extensions",
+    "skills",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^1.2.0",
+    "@earendil-works/pi-coding-agent": "^1.2.0",
+    "@earendil-works/pi-tui": "^1.2.0",
+    "@types/node": "^24.19.2",
+    "typebox": "^1.3.37",
+    "typescript": "^5.9.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  }
+}
