@@ -1,6 +1,6 @@
 {
   "name": "pi-cpp-lsp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Pi extension for C/C++ development with clangd integration, auto-formatting, linting, and compilation checks",
   "author": {
     "name": "Martin Juul Christiansen",
