@@ -1,5 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { registerBuildTools } from "./lib/build.ts";
+import { registerClangdTools } from "./lib/clangd.ts";
 import {
   truncateHead,
   DEFAULT_MAX_BYTES,
@@ -8,7 +10,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { existsSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { findCompilationDatabase, resolveCompileInvocation } from "./lib/compdb.ts";
 
 const CPP_EXTENSIONS = new Set([
   ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hxx", ".hh",
@@ -38,6 +41,8 @@ function truncateOutput(output: string): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  registerBuildTools(pi);
+  registerClangdTools(pi);
   // pi.exec never throws: a missing binary resolves with a non-zero exit code,
   // so check availability explicitly before running a tool.
   async function hasCommand(name: string): Promise<boolean> {
@@ -95,6 +100,7 @@ export default function (pi: ExtensionAPI) {
         { name: "clang-tidy", check: "clang-tidy --version", install: "brew install llvm" },
         { name: "cppcheck", check: "cppcheck --version", install: "brew install cppcheck" },
         { name: "cmake", check: "cmake --version", install: "brew install cmake" },
+        { name: "ctest", check: "ctest --version", install: "brew install cmake" },
       ];
 
       const results: string[] = [];
@@ -128,15 +134,24 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       file: Type.String({ description: "Path to the C/C++ source file to check" }),
+      build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json (default: auto-detect project root or build/)" })),
       tool: Type.Optional(
         Type.String({
           description: "Which tool to use: 'clang-tidy', 'cppcheck', or 'all' (default: 'all')",
         })
       ),
     }),
-    async execute(_toolCallId, params, signal, onUpdate, _ctx) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const tool = params.tool ?? "all";
+      const file = resolve(ctx.cwd, params.file);
+      let database: string | undefined;
+      try {
+        database = findCompilationDatabase(ctx.cwd, file, params.build_dir);
+      } catch (err) {
+        return { content: [{ type: "text", text: (err as Error).message }], details: { file, error: true }, isError: true };
+      }
       const results: string[] = [];
+      let failed = false;
       const checks = tool === "all" ? ["clang-tidy", "cppcheck"] : [tool];
 
       for (const checker of checks) {
@@ -146,10 +161,12 @@ export default function (pi: ExtensionAPI) {
         });
 
         if (checker !== "clang-tidy" && checker !== "cppcheck") {
+          failed = true;
           results.push(`=== ${checker} ===\nUnknown tool. Use 'clang-tidy', 'cppcheck', or 'all'.`);
           continue;
         }
         if (!(await hasCommand(checker))) {
+          failed = true;
           results.push(`=== ${checker} ===\nTool not available: ${checker} is not installed or not on PATH`);
           continue;
         }
@@ -157,7 +174,8 @@ export default function (pi: ExtensionAPI) {
         try {
           let result;
           if (checker === "clang-tidy") {
-            result = await pi.exec("clang-tidy", [params.file], {
+            result = await pi.exec("clang-tidy", [file, ...(database ? ["-p", dirname(database)] : [])], {
+              cwd: ctx.cwd,
               signal,
               timeout: 30000,
             });
@@ -165,15 +183,18 @@ export default function (pi: ExtensionAPI) {
             result = await pi.exec("cppcheck", [
               "--enable=all",
               "--suppress=missingIncludeSystem",
-              params.file,
-            ], { signal, timeout: 30000 });
+              file,
+            ], { signal, cwd: ctx.cwd, timeout: 30000 });
           }
 
+          const success = result.code === 0 && !result.killed && !signal?.aborted;
+          failed ||= !success;
           const output = result.stdout + (result.stderr ? "\n" + result.stderr : "");
           results.push(
-            `=== ${checker} ===\n${output.trim() || "No issues found ✓"}`
+            `=== ${checker} (exit ${result.code}${result.killed || signal?.aborted ? "; interrupted" : ""}) ===\n${output.trim() || (success ? "No issues found ✓" : "Analysis failed without diagnostic output")}`
           );
         } catch (err) {
+          failed = true;
           results.push(
             `=== ${checker} ===\nTool not available: ${(err as Error).message}`
           );
@@ -182,7 +203,8 @@ export default function (pi: ExtensionAPI) {
 
       return {
         content: [{ type: "text", text: truncateOutput(results.join("\n\n")) }],
-        details: { file: params.file, tool },
+        details: { file: params.file, tool, database, success: !failed },
+        isError: failed,
       };
     },
   });
@@ -192,82 +214,44 @@ export default function (pi: ExtensionAPI) {
     name: "cpp_compile",
     label: "C++ Compile Check",
     description:
-      "Compile-check a C/C++ source file to verify it builds without errors. Uses clang++ by default.",
+      "Syntax-check a C/C++ source using its compilation database command when available. Falls back to clang (C17) or clang++ (C++17).",
     promptSnippet: "Compile-check C/C++ files to verify they build",
     promptGuidelines: [
       "Use cpp_compile when the user wants to verify C/C++ code compiles cleanly.",
     ],
     parameters: Type.Object({
       file: Type.String({ description: "Path to the C/C++ source file to compile" }),
+      build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json (default: auto-detect project root or build/)" })),
       standard: Type.Optional(
         Type.String({
-          description: "C++ standard to use (default: 'c++17')",
+          description: "Override the compilation database language standard (standalone defaults: c17 for .c, c++17 otherwise)",
         })
       ),
       compiler: Type.Optional(
         Type.String({
-          description: "Compiler to use: 'clang++' or 'g++' (default: 'clang++')",
+          description: "Override the GCC/Clang compiler driver (default: database compiler, or clang/clang++ for standalone files)",
         })
       ),
     }),
-    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
-      const compiler = params.compiler ?? "clang++";
-      const standard = params.standard ?? "c++17";
-
-      if (!(await hasCommand(compiler))) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Compiler not available: ${compiler} is not installed or not on PATH`,
-            },
-          ],
-          details: { file: params.file, error: true },
-        };
-      }
-
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       try {
-        const result = await pi.exec(compiler, [
-          `-std=${standard}`,
-          "-fsyntax-only",
-          "-Wall",
-          "-Wextra",
-          params.file,
-        ], { signal, timeout: 30000 });
-
-        if (result.code === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `✓ Compilation successful (${compiler} -std=${standard})`,
-              },
-            ],
-            details: { file: params.file, compiler, standard, success: true },
-          };
-        }
-
+        const invocation = resolveCompileInvocation(ctx.cwd, params);
+        const { compiler, args, cwd, database } = invocation;
+        const result = await pi.exec(compiler, args, { signal, cwd, timeout: 30000 });
+        const success = result.code === 0 && !result.killed && !signal?.aborted;
         const output = (result.stdout + "\n" + result.stderr).trim();
         return {
-          content: [
-            {
-              type: "text",
-              text: truncateOutput(
-                `✗ Compilation failed (${compiler} -std=${standard}):\n${output}`
-              ),
-            },
-          ],
-          details: { file: params.file, compiler, standard, success: false },
+          content: [{ type: "text", text: truncateOutput(
+            `${success ? "✓ Compilation successful" : "✗ Compilation failed"} (${compiler}${database ? `; ${database}` : "; standalone defaults"})${output ? `:\n${output}` : ""}`
+          ) }],
+          details: { file: invocation.file, compiler, args, cwd, database, success, exitCode: result.code },
+          isError: !success,
         };
       } catch (err) {
         return {
-          content: [
-            {
-              type: "text",
-              text: `Compiler not available: ${(err as Error).message}`,
-            },
-          ],
+          content: [{ type: "text", text: `Compile check failed: ${(err as Error).message}` }],
           details: { file: params.file, error: true },
+          isError: true,
         };
       }
     },

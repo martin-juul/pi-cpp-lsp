@@ -1,8 +1,10 @@
 {
+  "ignores": ["node_modules/**"],
   "config": {
     "MD013": false,
     "MD020": false,
     "MD022": false,
+    "MD024": { "siblings_only": true },
     "MD029": false,
     "MD031": false,
     "MD032": false,

@@ -86,11 +86,15 @@ Use when starting C/C++ work in a new environment, when clangd can't find header
 ## Pitfalls
 
 - On macOS, LLVM tools are keg-only — you must add `/opt/homebrew/opt/llvm/bin` to PATH manually.
-- Without `compile_commands.json`, clangd cannot resolve includes or provide go-to-definition.
+- Without accurate compilation flags, clangd may fail to resolve project headers and symbols. Generate `compile_commands.json` and pass `build_dir` when using a custom build location.
 - The `cpp_compile` tool uses `-fsyntax-only` which is faster but skips linking — linker errors won't be caught.
+- Use `cpp_build` after configuration to catch linker errors, then `cpp_test` to run CTest tests.
+- `cpp_hover` and `cpp_definition` use saved files and 1-based line/column positions (UTF-16 columns).
 
 ## Verification
 
 - `clangd --version` exits 0
 - `compile_commands.json` exists in project root
 - `cpp_check` and `cpp_compile` tools work on a sample `.cpp` file
+- `cpp_hover` and `cpp_definition` resolve a known project symbol
+- For CMake projects with tests, `cpp_build` and `cpp_test` succeed
