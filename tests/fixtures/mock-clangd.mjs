@@ -67,6 +67,14 @@ process.stdin.on('data', chunk => {
       else if (doc.text.includes('EMPTY')) send({ id: message.id, result: null });
       else if (message.method.endsWith('hover')) send({ id: message.id, result: { contents: { kind: 'markdown', value: JSON.stringify({ text: doc.text, version: doc.version, position: message.params.position, buildDir, cancellations, argv: process.argv.slice(2) }) } } });
       else send({ id: message.id, result: [{ targetUri: doc.uri, targetRange: { start: { line: 0, character: 0 }, end: { line: 2, character: 4 } }, targetSelectionRange: { start: { line: 1, character: 2 }, end: { line: 1, character: 5 } } }] });
+    } else if (message.method === 'textDocument/references') {
+      // REFS <n> answers with n references, one per line of the queried document.
+      const doc = documents.get(message.params.textDocument.uri);
+      const count = Number(/REFS (\d+)/.exec(doc?.text ?? '')?.[1] ?? 0);
+      send({ id: message.id, result: Array.from({ length: count }, (_, line) => ({ uri: doc.uri, range: { start: { line, character: 4 }, end: { line, character: 8 } } })) });
+    } else if (message.method === 'textDocument/prepareCallHierarchy') {
+      const range = { start: { line: 0, character: 4 }, end: { line: 0, character: 8 } };
+      send({ id: message.id, result: [{ name: 'caller', kind: 12, uri: message.params.textDocument.uri, range, selectionRange: range }] });
     } else if (message.method === 'shutdown') send({ id: message.id, result: null });
     else if (message.method === 'exit') process.exit(0);
     else if (message.method === 'mock/requests') send({ id: message.id, result: requests });

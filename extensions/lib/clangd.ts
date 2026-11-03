@@ -36,7 +36,7 @@ export class ClangdUnsupportedError extends Error {
 
 function aborted(): Error { return new Error("clangd request cancelled"); }
 function checkSignal(signal?: AbortSignal) { if (signal?.aborted) throw aborted(); }
-function waitFor<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+export function waitFor<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise;
   if (signal.aborted) return Promise.reject(aborted());
   return new Promise((resolve, reject) => {
@@ -468,10 +468,10 @@ function hoverText(value: any): string {
   if (Array.isArray(value)) return value.map(hoverText).join("\n\n");
   return typeof value.value === "string" ? value.value : "";
 }
-function bounded(text: string) {
+export function bounded(text: string) {
   return text.length > MAX_OUTPUT ? `${text.slice(0, MAX_OUTPUT)}\n[clangd output truncated]` : text;
 }
-function location(value: any) {
+export function location(value: any) {
   const uri = value.targetUri ?? value.uri;
   const range = value.targetSelectionRange ?? value.range;
   if (typeof uri !== "string" || !range?.start || !range?.end) throw new Error("clangd returned an invalid definition location");
