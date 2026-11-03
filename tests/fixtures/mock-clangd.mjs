@@ -6,6 +6,7 @@ if (process.argv.includes('--help')) {
   process.stdout.write(`OPTIONS:\n${flags.map(flag => `  ${flag}  - mock`).join('\n')}\n`);
   process.exit(0);
 }
+import { appendFileSync, readFileSync } from 'node:fs';
 let buffer = Buffer.alloc(0);
 const documents = new Map();
 const cancellations = [];
@@ -75,6 +76,20 @@ process.stdin.on('data', chunk => {
     } else if (message.method === 'textDocument/prepareCallHierarchy') {
       const range = { start: { line: 0, character: 4 }, end: { line: 0, character: 8 } };
       send({ id: message.id, result: [{ name: 'caller', kind: 12, uri: message.params.textDocument.uri, range, selectionRange: range }] });
+    } else if (message.method === 'textDocument/prepareRename') {
+      // NO-RENAME refuses like clangd does at a position without a symbol.
+      const doc = documents.get(message.params.textDocument.uri);
+      const { line, character } = message.params.position;
+      if (doc?.text.includes('NO-RENAME')) send({ id: message.id, error: { code: -32001, message: 'Cannot rename symbol: there is no symbol at the given location' } });
+      else send({ id: message.id, result: { range: { start: { line, character }, end: { line, character: character + 4 } }, placeholder: 'name' } });
+    } else if (message.method === 'textDocument/rename') {
+      // RENAME-EDIT <path> answers with the WorkspaceEdit stored as JSON in that file.
+      // RENAME-TOUCH <path> first appends to that file, as if it changed after the client synced it.
+      const doc = documents.get(message.params.textDocument.uri);
+      const touch = /RENAME-TOUCH (\S+)/.exec(doc?.text ?? '')?.[1];
+      if (touch) appendFileSync(touch, '// changed on disk\n');
+      const edit = /RENAME-EDIT (\S+)/.exec(doc?.text ?? '')?.[1];
+      send({ id: message.id, result: edit ? JSON.parse(readFileSync(edit, 'utf8')) : null });
     } else if (message.method === 'shutdown') send({ id: message.id, result: null });
     else if (message.method === 'exit') process.exit(0);
     else if (message.method === 'mock/requests') send({ id: message.id, result: requests });

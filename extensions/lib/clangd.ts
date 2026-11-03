@@ -283,6 +283,11 @@ export class ClangdConnection {
     }), signal);
   }
 
+  /** The text clangd last received for `file`, or undefined when it is not open (clangd then reads it from disk). */
+  syncedText(file: string): string | undefined {
+    return this.documents.get(pathToFileURL(file).href)?.text;
+  }
+
   /** Opens `file` from disk (and refreshes other open documents); returns the version clangd now has. */
   syncFile(file: string, signal?: AbortSignal): Promise<{ uri: string; version: number }> {
     return this.serialize(signal, async () => (await this.refresh(file, signal))!);

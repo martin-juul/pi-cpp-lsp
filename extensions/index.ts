@@ -15,6 +15,7 @@ import { findCompilationDatabase, resolveCompileInvocation } from "./lib/compdb.
 import { ProjectService, type ProjectServiceOptions } from "./lib/project/session.ts";
 import { registerProjectTools } from "./lib/project/tools.ts";
 import { registerNavigationTools } from "./lib/navigation.ts";
+import { registerRenameTool } from "./lib/rename.ts";
 import { postEditNote, resolveToolPath, type PostEditOptions } from "./lib/diagnostics.ts";
 
 const FIXED_GUIDELINES = [
@@ -80,6 +81,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
   // Registered after session_start so the managed clangd attaches to the new project at once (KTD11).
   const clangd = registerClangdTools(pi, { getProject: () => project });
   registerNavigationTools(pi, clangd);
+  registerRenameTool(pi, clangd, { exec: (command, args, execOptions) => pi.exec(command, args, execOptions), getProject: () => project, ...options.diagnostics });
 
   pi.on("session_shutdown", async () => {
     project?.dispose();
