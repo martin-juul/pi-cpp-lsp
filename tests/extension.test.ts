@@ -23,3 +23,46 @@ test("extension registers the complete tool set, the project session lifecycle a
   assert.ok(commands.includes("cpp-setup"));
   assert.ok(commands.includes("cpp-preset"));
 });
+
+/** Runs /cpp-setup against canned tool versions; a tool missing from `versions` is not installed. */
+async function cppSetup(versions: Record<string, string>): Promise<string> {
+  const commands = new Map<string, any>();
+  const notes: string[] = [];
+  const exec = async (command: string, args: string[]) => {
+    // Tools are probed as `sh -c "<tool> --version"`, cmake as `cmake --version`.
+    const tool = command === "sh" ? args[1].split(" ")[0] : command;
+    const stdout = versions[tool];
+    return stdout === undefined ? { code: 127, stdout: "", stderr: "not found", killed: false } : { code: 0, stdout, stderr: "", killed: false };
+  };
+  extension({
+    registerTool() {}, on() {}, exec,
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+  } as unknown as ExtensionAPI);
+  await commands.get("cpp-setup").handler("", { ui: { notify: (message: string) => notes.push(message) } });
+  return notes.join("\n");
+}
+
+test("/cpp-setup lists ninja, the clangd features its version supports and the CMake thresholds", async () => {
+  const report = await cppSetup({
+    clangd: "Ubuntu clangd version 18.1.3 (1ubuntu1)\nFeatures: linux+grpc\n",
+    cmake: "cmake version 3.16.3\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake).\n",
+  });
+  assert.match(report, /✓ clangd: Ubuntu clangd version 18\.1\.3/);
+  assert.match(report, /✓ type hierarchy/);
+  assert.match(report, /✗ outgoing calls: needs clangd 21 or newer/);
+  assert.match(report, /✓ cmake: 3\.16\.3/);
+  assert.match(report, /✓ project model/);
+  assert.match(report, /✗ presets: need CMake 3\.19 or newer/);
+  assert.match(report, /✗ ninja: not found/);
+});
+
+test("/cpp-setup reports a CMake too old for the project model and a clangd with every navigation feature", async () => {
+  const report = await cppSetup({
+    clangd: "clangd version 21.1.8\n",
+    cmake: "cmake version 3.10.2\n",
+    ninja: "1.12.1\n",
+  });
+  assert.match(report, /✓ outgoing calls/);
+  assert.match(report, /✗ project model: needs CMake 3\.14 or newer/);
+  assert.match(report, /✓ ninja: 1\.12\.1/);
+});

@@ -17,6 +17,7 @@ import { registerProjectTools } from "./lib/project/tools.ts";
 import { registerNavigationTools } from "./lib/navigation.ts";
 import { registerRenameTool } from "./lib/rename.ts";
 import { postEditNote, resolveToolPath, type PostEditOptions } from "./lib/diagnostics.ts";
+import { isSupportedCmake, probeCmake, supportsPresets, type CmakeVersion } from "./lib/project/configure.ts";
 
 const FIXED_GUIDELINES = [
   "Prefer smart pointers over raw new/delete in C++ code.",
@@ -26,6 +27,32 @@ const FIXED_GUIDELINES = [
 // In CMake sessions the model drives the standard guidance (R9, KTD5).
 const STANDARD_GUIDELINE =
   "Write C/C++ code that is valid for the C++ standard of the target that owns the file you edit; the project briefing lists each target's standard.";
+
+/** The clangd major version that first supports each navigation feature (see navigation.ts). */
+const CLANGD_FEATURES: { feature: string; major: number }[] = [
+  { feature: "incoming calls (cpp_calls)", major: 12 },
+  { feature: "type hierarchy (cpp_types)", major: 16 },
+  { feature: "outgoing calls (cpp_calls)", major: 21 },
+];
+
+/** /cpp-setup lines for the navigation features the clangd `--version` line supports. */
+function clangdFeatures(versionLine: string): string[] {
+  const match = versionLine.match(/clangd version (\d+)/);
+  if (!match) return ["  ? navigation features: could not read the clangd version"];
+  const major = Number(match[1]);
+  return CLANGD_FEATURES.map(({ feature, major: needed }) =>
+    major >= needed ? `  ✓ ${feature}` : `  ✗ ${feature.replace(/ \(.*\)$/, "")}: needs clangd ${needed} or newer`);
+}
+
+/** /cpp-setup lines for the CMake features this version supports (KTD18). */
+function cmakeFeatures(cmake: CmakeVersion): string[] {
+  return [
+    isSupportedCmake(cmake)
+      ? "  ✓ project model (briefing, drift, managed build)"
+      : "  ✗ project model: needs CMake 3.14 or newer; CMake projects are treated like non-CMake ones",
+    supportsPresets(cmake) ? "  ✓ presets (/cpp-preset)" : "  ✗ presets: need CMake 3.19 or newer",
+  ];
+}
 
 export interface ExtensionOptions {
   /** Overrides for the per-session project service, such as a shorter report-point wait. */
@@ -140,24 +167,32 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
 
   // ── Register /cpp-setup command ──────────────────────────────────
   pi.registerCommand("cpp-setup", {
-    description: "Set up C/C++ development environment (clangd, clang-format, clang-tidy, cppcheck)",
+    description: "Check the C/C++ toolchain (clangd, clang-format, clang-tidy, cppcheck, cmake, ninja) and which features it supports",
     handler: async (_args, ctx) => {
       const tools = [
         { name: "clangd", check: "clangd --version", install: "brew install llvm" },
         { name: "clang-format", check: "clang-format --version", install: "brew install llvm" },
         { name: "clang-tidy", check: "clang-tidy --version", install: "brew install llvm" },
         { name: "cppcheck", check: "cppcheck --version", install: "brew install cppcheck" },
-        { name: "cmake", check: "cmake --version", install: "brew install cmake" },
+        { name: "cmake", check: "", install: "brew install cmake" },
         { name: "ctest", check: "ctest --version", install: "brew install cmake" },
+        { name: "ninja", check: "ninja --version", install: "brew install ninja (optional; the managed build falls back to Unix Makefiles)" },
       ];
 
       const results: string[] = [];
       for (const tool of tools) {
+        if (tool.name === "cmake") {
+          const cmake = await probeCmake((command, args, execOptions) => pi.exec(command, args, execOptions));
+          if (cmake) results.push(`✓ cmake: ${cmake.text}`, ...cmakeFeatures(cmake));
+          else results.push(`✗ cmake: not found — install with: ${tool.install}`);
+          continue;
+        }
         try {
           const r = await pi.exec("sh", ["-c", tool.check], { timeout: 5000 });
           if (r.code === 0) {
             const version = r.stdout.trim().split("\n")[0];
             results.push(`✓ ${tool.name}: ${version}`);
+            if (tool.name === "clangd") results.push(...clangdFeatures(version));
           } else {
             results.push(`✗ ${tool.name}: not found — install with: ${tool.install}`);
           }

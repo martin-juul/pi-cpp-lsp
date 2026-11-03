@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   typecheck:
-    runs-on: ubuntu-latest
+    # Pinned so the apt.llvm.org repository below matches the runner's release (noble).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -20,15 +21,22 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - name: Install integration test toolchain
+        # Ubuntu's clangd 18 lacks outgoing calls; clangd 21 from apt.llvm.org runs every navigation test.
         run: |
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/keyrings/apt.llvm.org.asc > /dev/null
+          echo "deb [signed-by=/etc/apt/keyrings/apt.llvm.org.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
           sudo apt-get update
-          sudo apt-get install -y clang clangd cmake build-essential
+          sudo apt-get install -y clang clangd-21 cmake ninja-build build-essential
+          sudo ln -sf /usr/bin/clangd-21 /usr/local/bin/clangd
       - name: Verify integration test tools
         run: |
           clang++ --version
           clangd --version
+          clangd --version | grep -Eq 'clangd version (2[1-9]|[3-9][0-9])\.' || { echo "clangd 21 or newer is required"; exit 1; }
           cmake --version
           ctest --version
+          ninja --version
       - run: npm test
       - run: npm pack --dry-run
 
