@@ -21,7 +21,7 @@ import { isSupportedCmake, probeCmake, supportsPresets, type CmakeVersion, type 
 
 const FIXED_GUIDELINES = [
   "Prefer smart pointers over raw new/delete in C++ code.",
-  "Ensure compile_commands.json exists for proper clangd support.",
+  "Make sure compile_commands.json exists; clangd reads each file's compile flags from it.",
   "Use minimal diffs when editing C/C++ files.",
 ];
 // In CMake sessions the model drives the standard guidance (R9, KTD5).
@@ -212,7 +212,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
     ],
     parameters: Type.Object({
       file: Type.String({ description: "Path to the C/C++ source file to check" }),
-      build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json (default: the managed CMake build directory when the project model is ready, otherwise auto-detect project root or build/)" })),
+      build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json (default: the managed CMake build directory when the project model is ready, otherwise the first compile_commands.json found in the cwd or a parent directory of the file, directly or under build/)" })),
       tool: Type.Optional(
         Type.String({
           description: "Which tool to use: 'clang-tidy', 'cppcheck', or 'all' (default: 'all')",
@@ -299,7 +299,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
     ],
     parameters: Type.Object({
       file: Type.String({ description: "Path to the C/C++ source file to compile" }),
-      build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json (default: the managed CMake build directory when the project model is ready, otherwise auto-detect project root or build/)" })),
+      build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json (default: the managed CMake build directory when the project model is ready, otherwise the first compile_commands.json found in the cwd or a parent directory of the file, directly or under build/)" })),
       standard: Type.Optional(
         Type.String({
           description: "Override the compilation database language standard (standalone defaults: c17 for .c, c++17 otherwise)",
@@ -417,7 +417,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
     name: "cpp_gen_compdb",
     label: "Generate compile_commands.json",
     description:
-      "Generate a compile_commands.json for the project using CMake or Bear, enabling clangd features like go-to-definition.",
+      "Generate compile_commands.json for the project with CMake or Bear. clangd needs it for features such as go-to-definition.",
     promptSnippet: "Generate compile_commands.json for clangd",
     promptGuidelines: [
       "Use cpp_gen_compdb when clangd needs a compile_commands.json, when headers aren't found, or when the user asks to set up the compilation database.",
@@ -425,7 +425,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
     parameters: Type.Object({
       method: Type.Optional(
         Type.String({
-          description: "Method: 'cmake' or 'bear' (default: auto-detect)",
+          description: "'cmake' or 'bear' (default: cmake when the cwd has a CMakeLists.txt, else bear when it has a Makefile)",
         })
       ),
       build_dir: Type.Optional(

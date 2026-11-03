@@ -16,7 +16,7 @@ const hasGit = spawnSync("git", ["--version"]).status === 0;
 const hasClang = spawnSync("clang++", ["--version"]).status === 0;
 const FIXED_GUIDELINES = [
   "Prefer smart pointers over raw new/delete in C++ code.",
-  "Ensure compile_commands.json exists for proper clangd support.",
+  "Make sure compile_commands.json exists; clangd reads each file's compile flags from it.",
   "Use minimal diffs when editing C/C++ files.",
 ];
 

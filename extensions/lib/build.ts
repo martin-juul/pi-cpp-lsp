@@ -18,7 +18,7 @@ export type ProjectModelSource = () => ProjectModel | undefined;
 
 const timeoutParameter = Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS, description: "Command timeout in milliseconds (default: 120000, maximum: 600000)" }));
 const commonParameters = {
-  build_dir: Type.Optional(Type.String({ minLength: 1, description: "Configured CMake build directory (default: the extension's managed build directory when the CMake project model is ready, otherwise build)" })),
+  build_dir: Type.Optional(Type.String({ minLength: 1, description: "Configured CMake build directory (default: the extension's managed build directory when the CMake project model is ready, otherwise 'build')" })),
   config: Type.Optional(Type.String({ minLength: 1, description: "Build configuration, for example Debug or Release" })),
   parallel: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum parallel jobs" })),
   timeout_ms: timeoutParameter,
