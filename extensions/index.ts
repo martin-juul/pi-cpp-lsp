@@ -17,7 +17,7 @@ import { registerProjectTools } from "./lib/project/tools.ts";
 import { registerNavigationTools } from "./lib/navigation.ts";
 import { registerRenameTool } from "./lib/rename.ts";
 import { postEditNote, resolveToolPath, type PostEditOptions } from "./lib/diagnostics.ts";
-import { isSupportedCmake, probeCmake, supportsPresets, type CmakeVersion } from "./lib/project/configure.ts";
+import { isSupportedCmake, probeCmake, supportsPresets, type CmakeVersion, type Exec } from "./lib/project/configure.ts";
 
 const FIXED_GUIDELINES = [
   "Prefer smart pointers over raw new/delete in C++ code.",
@@ -80,6 +80,7 @@ function truncateOutput(output: string): string {
 }
 
 export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
+  const exec: Exec = (command, args, execOptions) => pi.exec(command, args, execOptions);
   // Tools without an explicit build_dir default to the session's ready CMake model (KTD16).
   const projectModel = () => project?.model;
   registerBuildTools(pi, projectModel);
@@ -99,7 +100,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
     // Root discovery and configure run in the background (KTD20).
     project = new ProjectService({
       cwd: ctx.cwd,
-      exec: (command, args, execOptions) => pi.exec(command, args, execOptions),
+      exec,
       notify: (message, level) => ctx.ui.notify(message, level),
       waitMs: options.project?.waitMs,
     });
@@ -108,7 +109,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
   // Registered after session_start so the managed clangd attaches to the new project at once (KTD11).
   const clangd = registerClangdTools(pi, { getProject: () => project });
   registerNavigationTools(pi, clangd);
-  registerRenameTool(pi, clangd, { exec: (command, args, execOptions) => pi.exec(command, args, execOptions), getProject: () => project, ...options.diagnostics });
+  registerRenameTool(pi, clangd, { exec, getProject: () => project, ...options.diagnostics });
 
   pi.on("session_shutdown", async () => {
     project?.dispose();
@@ -137,31 +138,23 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
 
   // ── Post-edit pipeline on write/edit, project report point on bash ─
   pi.on("tool_result", async (event, ctx) => {
-    const notes: string[] = [];
+    let note: string | undefined;
     if (
       (event.toolName === "write" || event.toolName === "edit") &&
       !event.isError
     ) {
       const input = event.input as { path?: string };
       // Format, drift, owner and clangd diagnostics in one note (KTD13).
-      const note = input.path
+      note = input.path
         ? await postEditNote(resolveToolPath(ctx.cwd, input.path), {
-          exec: (command, args, execOptions) => pi.exec(command, args, execOptions),
-          cwd: ctx.cwd, project, clangd, ...options.diagnostics,
+          exec, cwd: ctx.cwd, project, clangd, ...options.diagnostics,
         })
         : await project?.reportPoint();
-      if (note) notes.push(`\n${note}`);
     } else if (event.toolName === "bash") {
-      const drift = await project?.reportPoint();
-      if (drift) notes.push(`\n${drift}`);
+      note = await project?.reportPoint();
     }
-    if (notes.length > 0) {
-      return {
-        content: [
-          ...event.content,
-          ...notes.map(text => ({ type: "text" as const, text })),
-        ],
-      };
+    if (note) {
+      return { content: [...event.content, { type: "text" as const, text: `\n${note}` }] };
     }
   });
 
@@ -182,7 +175,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
       const results: string[] = [];
       for (const tool of tools) {
         if (tool.name === "cmake") {
-          const cmake = await probeCmake((command, args, execOptions) => pi.exec(command, args, execOptions));
+          const cmake = await probeCmake(exec);
           if (cmake) results.push(`✓ cmake: ${cmake.text}`, ...cmakeFeatures(cmake));
           else results.push(`✗ cmake: not found — install with: ${tool.install}`);
           continue;

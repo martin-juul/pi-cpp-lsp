@@ -46,6 +46,22 @@ export function waitFor<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T
   });
 }
 
+/** Throws unless 1-based UTF-16 `line` and `column` lie within `text` (a column may sit just past the line's end). */
+export function checkPosition(text: string, line: number, column: number): void {
+  const lines = text.split(/\r\n|\n|\r/);
+  if (!Number.isInteger(line) || !Number.isInteger(column) || line < 1 || column < 1 || line > lines.length || column > lines[line - 1]!.length + 1) {
+    throw new Error("Position is outside the file. line and column must be positive, 1-based UTF-16 positions.");
+  }
+}
+
+/** Reads `file` and checks a 1-based UTF-16 position in it, before any server starts; returns the LSP position request. */
+export async function position(cwd: string, params: { file: string; line: number; column: number }) {
+  const file = resolve(cwd, params.file);
+  const { line, column } = params;
+  checkPosition(await readFile(file, "utf8"), line, column);
+  return { file, line, column, request: { textDocument: { uri: pathToFileURL(file).href }, position: { line: line - 1, character: column - 1 } } };
+}
+
 /** A small stdio LSP client. Positions on the wire are zero-based UTF-16. */
 export class ClangdConnection {
   private child: ChildProcessWithoutNullStreams;
@@ -325,12 +341,7 @@ export class ClangdConnection {
 
   async query(method: "hover" | "definition", file: string, line: number, column: number, signal?: AbortSignal): Promise<any> {
     return this.serialize(signal, async () => {
-      const synced = await this.refresh(file, signal, text => {
-        const lines = text.split(/\r\n|\n|\r/);
-        if (!Number.isInteger(line) || !Number.isInteger(column) || line < 1 || column < 1 || line > lines.length || column > lines[line - 1]!.length + 1) {
-          throw new Error("Position is outside the file. line and column must be positive, 1-based UTF-16 positions.");
-        }
-      });
+      const synced = await this.refresh(file, signal, text => checkPosition(text, line, column));
       return this.call(`textDocument/${method}`, { textDocument: { uri: synced!.uri }, position: { line: line - 1, character: column - 1 } }, signal);
     });
   }

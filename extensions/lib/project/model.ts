@@ -101,7 +101,8 @@ export function bestRealPath(path: string): string {
   }
 }
 
-const isWithin = (dir: string, path: string) => path === dir || path.startsWith(dir.endsWith(sep) ? dir : dir + sep);
+/** Whether `path` is `dir` or lies under it; both must be normalized absolute paths. */
+export const isWithin = (dir: string, path: string) => path === dir || path.startsWith(dir.endsWith(sep) ? dir : dir + sep);
 
 const SKIPPED_DIR = /^(?:\.git|build.*|cmake-build-.*|out|_deps)$/;
 
@@ -111,15 +112,29 @@ const SKIPPED_DIR = /^(?:\.git|build.*|cmake-build-.*|out|_deps)$/;
  * `root` (exclusive) and `path`. Paths outside `root` are not considered skipped.
  */
 export function isInSkippedDir(root: string, path: string): boolean {
-  const rel = relative(root, path);
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return false;
-  let current = root;
-  for (const segment of rel.split(sep)) {
-    if (SKIPPED_DIR.test(segment)) return true;
-    current = join(current, segment);
-    if (existsSync(join(current, "CMakeCache.txt"))) return true;
-  }
-  return false;
+  return skippedDirCheck(root)(path);
+}
+
+/**
+ * isInSkippedDir for many paths under one `root`, remembering each directory's answer so a path
+ * only checks the segments its already-seen parent directories did not.
+ */
+export function skippedDirCheck(root: string): (path: string) => boolean {
+  // Keyed by the path relative to `root`; the answer for a relative path covers all its prefixes.
+  const known = new Map<string, boolean>();
+  const skipped = (rel: string): boolean => {
+    let answer = known.get(rel);
+    if (answer === undefined) {
+      const cut = rel.lastIndexOf(sep);
+      answer = (cut >= 0 && skipped(rel.slice(0, cut))) || SKIPPED_DIR.test(rel.slice(cut + 1)) || existsSync(join(root, rel, "CMakeCache.txt"));
+      known.set(rel, answer);
+    }
+    return answer;
+  };
+  return path => {
+    const rel = relative(root, path);
+    return rel === "" || rel.startsWith("..") || isAbsolute(rel) ? false : skipped(rel);
+  };
 }
 
 // ---------------------------------------------------------------------------

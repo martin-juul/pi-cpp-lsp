@@ -1,8 +1,8 @@
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { boundedOutput } from "../output.ts";
-import { configureErrorExcerpt, displayPath } from "./briefing.ts";
+import { configureErrorExcerpt, displayPath, ownedDirectories } from "./briefing.ts";
 import { findTarget, formatStandard, type ProjectModel, type ProjectTarget } from "./model.ts";
 import { writeRememberedPreset } from "./root.ts";
 import type { ProjectService } from "./session.ts";
@@ -53,8 +53,7 @@ function noModel(project: ProjectService): string {
 }
 
 function targetLine(root: string, target: ProjectTarget): string {
-  const dirs = [...new Set(target.sources.filter(source => !source.isGenerated).map(source => displayPath(root, dirname(source.path))))].sort();
-  return `- ${target.name} (${target.kind}, ${formatStandard(target.cxxStandard)}) in ${list(dirs.length > 0 ? dirs : [displayPath(root, target.sourceDir)])}; depends on: ${list(target.dependencies)}`;
+  return `- ${target.name} (${target.kind}, ${formatStandard(target.cxxStandard)}) in ${list(ownedDirectories(root, target))}; depends on: ${list(target.dependencies)}`;
 }
 
 function targetsText(project: ProjectService, model: ProjectModel): string {

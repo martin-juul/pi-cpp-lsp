@@ -4,10 +4,10 @@ import {
   BRIEFING_BUDGET, describeFinding, describeResolved, configureErrorExcerpt, displayPath, renderBriefing, type ProjectStatus,
 } from "./briefing.ts";
 import {
-  ConfigureManager, isSupportedCmake, probeCmake, resolvePreset, type CmakeVersion, type ConfigureResult, type Exec,
+  ConfigureManager, isSupportedCmake, PRESET_FILES, probeCmake, resolvePreset, type CmakeVersion, type ConfigureResult, type Exec,
 } from "./configure.ts";
 import { FindingsLedger, findingKey, scanDrift, type DriftFinding, type DriftReport, type ReferencedSource, type UnregisteredFinding } from "./drift.ts";
-import { effectiveStandard, formatStandard, isInSkippedDir, loadProjectModel, ownersOf, type ProjectModel } from "./model.ts";
+import { effectiveStandard, formatStandard, isInSkippedDir, isWithin, loadProjectModel, ownersOf, type ProjectModel } from "./model.ts";
 import { findSourceRoot, projectCacheDir } from "./root.ts";
 
 export type { ProjectStatus } from "./briefing.ts";
@@ -21,7 +21,6 @@ export const BRIEFING_MESSAGE = "cpp-project-briefing";
 export const LOADING_MESSAGE = "cpp-project-loading";
 export const UPDATE_MESSAGE = "cpp-project-update";
 
-const PRESET_FILES = ["CMakePresets.json", "CMakeUserPresets.json"];
 const NOTE_PREFIX = "[cpp-lsp]";
 
 export interface ProjectServiceOptions {
@@ -70,14 +69,6 @@ export interface RunMessage {
   content: string;
   display: boolean;
 }
-
-interface Refresh {
-  /** A configure did not finish within the bound. */
-  timedOut: boolean;
-  lines: string[];
-}
-
-const isWithin = (dir: string, path: string) => path === dir || path.startsWith(`${dir}/`);
 
 /** Resolves true when `promise` settles before `deadline`, false otherwise. */
 async function settlesBy(promise: Promise<unknown>, deadline: number): Promise<boolean> {
@@ -166,7 +157,7 @@ export class ProjectService {
       return;
     }
     this.cmake = cmake;
-    this.manager = new ConfigureManager({ root, exec: this.exec, signal: this.controller.signal });
+    this.manager = new ConfigureManager({ root, exec: this.exec, signal: this.controller.signal, cmake });
     void this.reconfigure();
   }
 
@@ -363,20 +354,21 @@ export class ProjectService {
     if (!this.root) return undefined;
     const deadline = Date.now() + this.waitMs;
     if (!(await settlesBy(this.initialized, deadline)) || this.nonCmake || this.controller.signal.aborted) return undefined;
-    const { lines } = await this.refresh(deadline, false);
+    const lines = await this.refresh(deadline, false);
     return lines.length > 0 ? `${NOTE_PREFIX} ${lines.join("\n")}` : undefined;
   }
 
-  private async refresh(deadline: number, forBriefing: boolean): Promise<Refresh> {
+  /** The report-point lines; a briefing refresh updates the state the same way but returns none. */
+  private async refresh(deadline: number, forBriefing: boolean): Promise<string[]> {
     let configuredHere = false;
     if (this.isStale()) {
       void this.reconfigure();
       configuredHere = true;
     }
     if (this.job && !(await settlesBy(this.job, deadline))) {
-      return { timedOut: true, lines: forBriefing ? [] : [RECONFIGURING_NOTE] };
+      return forBriefing ? [] : [RECONFIGURING_NOTE];
     }
-    if (!this.result || this.controller.signal.aborted) return { timedOut: false, lines: [] };
+    if (!this.result || this.controller.signal.aborted) return [];
 
     const lines: string[] = [];
     if (!forBriefing) lines.push(...this.configureLines(), ...this.modelChangeLines());
@@ -384,8 +376,8 @@ export class ProjectService {
     this.reportedModel = this.currentModel;
 
     let report = await this.scan();
-    if (!report) return { timedOut: false, lines };
-    const isNew = (finding: DriftFinding) => !this.ledger.open.some(open => findingKey(open) === findingKey(finding));
+    if (!report) return lines;
+    const isNew = (finding: DriftFinding) => !this.ledger.has(findingKey(finding));
     const unregisteredNow = (path: string, from: DriftReport) => from.findings.some(finding => finding.kind === "unregistered" && finding.path === path);
 
     // Pending glob confirmations from an earlier report point (KTD8).
@@ -415,7 +407,7 @@ export class ProjectService {
         }
       }
     }
-    if (report.sequence < this.appliedSequence) return { timedOut, lines };
+    if (report.sequence < this.appliedSequence) return lines;
     this.appliedSequence = report.sequence;
 
     // Held-back glob files stay out of the ledger until their reconfigure finishes.
@@ -438,8 +430,7 @@ export class ProjectService {
       this.reportedSkipped = report.report.skipped;
     }
     if (timedOut) lines.push(RECONFIGURING_NOTE);
-    if (forBriefing) return { timedOut, lines: [] };
-    return { timedOut, lines };
+    return forBriefing ? [] : lines;
   }
 
   private async scan(): Promise<{ report: DriftReport; sequence: number } | undefined> {
@@ -507,7 +498,7 @@ export class ProjectService {
     const deadline = Date.now() + this.waitMs;
     if (!(await settlesBy(this.initialized, deadline)) || this.nonCmake || this.controller.signal.aborted) return undefined;
     if (!this.briefingDue) {
-      const { lines } = await this.refresh(deadline, false);
+      const lines = await this.refresh(deadline, false);
       return lines.length > 0 ? { customType: UPDATE_MESSAGE, content: `${NOTE_PREFIX} ${lines.join("\n")}`, display: true } : undefined;
     }
     await this.refresh(deadline, true);

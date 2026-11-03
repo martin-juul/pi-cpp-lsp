@@ -45,7 +45,7 @@ export async function probeCmake(exec: Exec, signal?: AbortSignal): Promise<Cmak
 // Presets
 
 type RawPreset = Record<string, unknown> & { name: string };
-const PRESET_FILES = ["CMakePresets.json", "CMakeUserPresets.json"];
+export const PRESET_FILES = ["CMakePresets.json", "CMakeUserPresets.json"];
 
 function loadPresetFile(path: string, root: string, presets: Map<string, RawPreset>, seen: Set<string>, errors: string[]): void {
   if (seen.has(path)) return;
@@ -328,6 +328,8 @@ export interface ConfigureManagerOptions {
   exec: Exec;
   /** Aborting kills a running configure and cancels the queued rerun (session shutdown). */
   signal?: AbortSignal;
+  /** The version a caller already probed; without it the first run probes cmake. */
+  cmake?: CmakeVersion;
 }
 
 /**
@@ -346,6 +348,7 @@ export class ConfigureManager {
     this.root = options.root;
     this.exec = options.exec;
     this.signal = options.signal;
+    this.cmake = options.cmake;
   }
 
   get configuring(): boolean {

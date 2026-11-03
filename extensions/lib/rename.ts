@@ -2,12 +2,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { randomBytes } from "node:crypto";
 import { chmod, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { bounded, waitFor, type ManagedClangd } from "./clangd.ts";
-import { postEditNote, type PostEditOptions } from "./diagnostics.ts";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { bounded, position, waitFor, type ManagedClangd } from "./clangd.ts";
+import { cwdDisplayPath, postEditLines, postEditText, type PostEditOptions } from "./diagnostics.ts";
+import { plural } from "./output.ts";
 import type { Exec } from "./project/configure.ts";
-import { bestRealPath, isInSkippedDir } from "./project/model.ts";
+import { bestRealPath, isInSkippedDir, isWithin } from "./project/model.ts";
 import { projectCacheDir } from "./project/root.ts";
 import type { ProjectService } from "./project/session.ts";
 
@@ -15,12 +16,12 @@ import type { ProjectService } from "./project/session.ts";
 export const INDEX_WAIT_MS = 30_000;
 
 const NO_PROJECT = "Rename needs the CMake project model and its managed clangd index, and none is ready: this is not a CMake project, or its configure is still running or failed. Check with cpp_project.";
-const NOTE_PREFIX = "[cpp-lsp] ";
 
 /** The parts of the project service the rename uses. */
 export type RenameProject = Pick<ProjectService, "model" | "reportPoint" | "ownerOf">;
 
-export interface RenameToolOptions {
+/** cpp_rename's options; waitMs and firstOpenWaitMs bound the post-edit diagnostics (see PostEditOptions). */
+export interface RenameToolOptions extends Pick<PostEditOptions, "waitMs" | "firstOpenWaitMs"> {
   /** Runs clang-format for the post-edit pipeline; pass pi.exec. */
   exec: Exec;
   /** The session's project service. */
@@ -29,9 +30,6 @@ export interface RenameToolOptions {
   indexWaitMs?: number;
   /** Writes one file's new text; defaults to a temporary file renamed into place. */
   write?: (file: string, text: string) => Promise<void>;
-  /** Post-edit diagnostics wait bounds (see PostEditOptions). */
-  waitMs?: PostEditOptions["waitMs"];
-  firstOpenWaitMs?: PostEditOptions["firstOpenWaitMs"];
 }
 
 /** A reason to refuse the whole rename, naming the offending file when there is one; nothing has been written. */
@@ -45,24 +43,6 @@ class Refusal extends Error {
 
 type Position = { line: number; character: number };
 type TextEdit = { range: { start: Position; end: Position }; newText: string };
-
-const isWithin = (dir: string, path: string) => path === dir || path.startsWith(dir.endsWith(sep) ? dir : dir + sep);
-
-function displayPath(cwd: string, file: string): string {
-  const path = relative(cwd, file);
-  return path && !path.startsWith("..") && !isAbsolute(path) ? path : file;
-}
-
-/** Reads `file` and checks a 1-based UTF-16 position in it, as the navigation tools do. */
-async function position(cwd: string, params: { file: string; line: number; column: number }) {
-  const file = resolve(cwd, params.file);
-  const lines = (await readFile(file, "utf8")).split(/\r\n|\n|\r/);
-  const { line, column } = params;
-  if (!Number.isInteger(line) || !Number.isInteger(column) || line < 1 || column < 1 || line > lines.length || column > lines[line - 1]!.length + 1) {
-    throw new Error("Position is outside the file. line and column must be positive, 1-based UTF-16 positions.");
-  }
-  return { file, request: { textDocument: { uri: pathToFileURL(file).href }, position: { line: line - 1, character: column - 1 } } };
-}
 
 function pathOf(uri: unknown): string {
   if (typeof uri !== "string" || !uri.startsWith("file:")) throw new Refusal(`clangd returned an edit for a non-file location: ${String(uri)}`);
@@ -126,10 +106,6 @@ async function atomicWrite(file: string, text: string): Promise<void> {
     await rm(temp, { force: true });
     throw error;
   }
-}
-
-function plural(count: number, word: string): string {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
 /**
@@ -219,14 +195,15 @@ export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd
       }
 
       // Step 6: format and diagnose each file. The drift report point runs once for the whole rename.
-      const perFile = { ownerOf: (path: string) => project.ownerOf(path), reportPoint: async () => undefined };
+      // Without reportPoint the per-file pipeline skips the drift step.
+      const perFile = { ownerOf: (path: string) => project.ownerOf(path) };
       const changed: { file: string; edits: number; note?: string }[] = [];
       const lines = [`Renamed to ${params.new_name} in ${plural(planned.length, "file")}:`];
       for (const entry of planned) {
-        const note = await postEditNote(entry.file, { exec: options.exec, cwd: ctx.cwd, project: perFile, clangd: managed, waitMs: options.waitMs, firstOpenWaitMs: options.firstOpenWaitMs });
-        changed.push({ file: entry.file, edits: entry.edits, note });
-        lines.push(`${displayPath(ctx.cwd, entry.file)}: ${plural(entry.edits, "edit")}`);
-        if (note) lines.push(...(note.startsWith(NOTE_PREFIX) ? note.slice(NOTE_PREFIX.length) : note).split("\n").map(line => `  ${line}`));
+        const noteLines = await postEditLines(entry.file, { exec: options.exec, cwd: ctx.cwd, project: perFile, clangd: managed, waitMs: options.waitMs, firstOpenWaitMs: options.firstOpenWaitMs });
+        changed.push({ file: entry.file, edits: entry.edits, note: postEditText(noteLines) });
+        lines.push(`${cwdDisplayPath(ctx.cwd, entry.file)}: ${plural(entry.edits, "edit")}`);
+        if (noteLines.length > 0) lines.push(...noteLines.join("\n").split("\n").map(line => `  ${line}`));
       }
       const drift = await project.reportPoint().catch(() => undefined);
       if (drift) lines.push(drift);

@@ -5,6 +5,11 @@ import { join } from "node:path";
 const MAX_OUTPUT_BYTES = 40_000;
 const MAX_OUTPUT_LINES = 1_000;
 
+/** "1 file", "2 files". */
+export function plural(count: number, word: string): string {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
 // Keep model-visible output bounded while preserving diagnostics for inspection.
 export function boundedOutput(output: string): { text: string; truncated: boolean; logFile?: string } {
   const lines = output.split("\n");

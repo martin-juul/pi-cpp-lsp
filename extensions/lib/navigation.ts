@@ -3,7 +3,7 @@ import { Type, type TSchema } from "typebox";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { bounded, ClangdUnsupportedError, location, waitFor, type ClangdConnection, type IndexState, type ManagedClangd } from "./clangd.ts";
+import { bounded, ClangdUnsupportedError, location, position, waitFor, type ClangdConnection, type IndexState, type ManagedClangd } from "./clangd.ts";
 
 /** Entries listed per result; the rest are counted as omitted. */
 const MAX_ENTRIES = 100;
@@ -35,17 +35,6 @@ function indexNote(state: IndexState): string | undefined {
 function at(value: { file: string; line: number; column: number }) { return `${value.file}:${value.line}:${value.column}`; }
 function itemLocation(item: any) { return location({ uri: item?.uri, range: item?.selectionRange ?? item?.range }); }
 function omitted(count: number, noun: string) { return count > 0 ? [`[${count} more ${noun} omitted]`] : []; }
-
-/** Reads `file` and checks a 1-based UTF-16 position in it, as cpp_hover does, before any server starts. */
-async function position(cwd: string, params: { file: string; line: number; column: number }) {
-  const file = resolve(cwd, params.file);
-  const lines = (await readFile(file, "utf8")).split(/\r\n|\n|\r/);
-  const { line, column } = params;
-  if (!Number.isInteger(line) || !Number.isInteger(column) || line < 1 || column < 1 || line > lines.length || column > lines[line - 1]!.length + 1) {
-    throw new Error("Position is outside the file. line and column must be positive, 1-based UTF-16 positions.");
-  }
-  return { file, line, column, request: { textDocument: { uri: pathToFileURL(file).href }, position: { line: line - 1, character: column - 1 } } };
-}
 
 interface Answer { text: string; details: Record<string, unknown>; found: boolean }
 type Connect = () => Promise<ClangdConnection>;
@@ -154,19 +143,21 @@ const calls: NavigationTool = {
   indexed: () => true,
   async run(params, cwd, connect, signal) {
     const { input, items, results } = await hierarchy(params, cwd, connect, signal, "textDocument/prepareCallHierarchy", `callHierarchy/${params.direction}Calls`);
+    const incoming = params.direction === "incoming";
+    const verb = incoming ? "calls it at" : "called at";
     const base = { file: input.file, line: input.line, column: input.column, direction: params.direction };
     if (!items.length) return { text: "No function at this position.", found: false, details: { ...base, calls: [], omitted: 0 } };
     const entries = results.flatMap(({ from, result }) => result.map(call => {
-      const other = params.direction === "incoming" ? call.from : call.to;
+      const other = incoming ? call.from : call.to;
       // Call sites lie in the caller: the listed function for incoming calls, the queried one for outgoing calls.
-      const siteFile = itemLocation(params.direction === "incoming" ? other : from).file;
+      const siteFile = itemLocation(incoming ? other : from).file;
       const sites = (Array.isArray(call.fromRanges) ? call.fromRanges : []).map((range: any) => location({ uri: pathToFileURL(siteFile).href, range }));
       return { name: other?.name as string, ...itemLocation(other), sites };
     }));
     const shown = entries.slice(0, MAX_ENTRIES);
     const lines = shown.map(entry => {
-      const sites = entry.sites.map((site: any) => params.direction === "incoming" ? `${site.line}:${site.column}` : at(site)).join(", ");
-      return `${at(entry)}  ${entry.name}${sites ? params.direction === "incoming" ? `  (calls it at ${sites})` : `  (called at ${sites})` : ""}`;
+      const sites = entry.sites.map((site: any) => incoming ? `${site.line}:${site.column}` : at(site)).join(", ");
+      return `${at(entry)}  ${entry.name}${sites ? `  (${verb} ${sites})` : ""}`;
     });
     const name = items.map(item => item.name).join(", ");
     const text = shown.length

@@ -1,6 +1,7 @@
 import { dirname, isAbsolute, relative } from "node:path";
 import type { ConfigureResult } from "./configure.ts";
 import type { DriftFinding, ReferencedSource } from "./drift.ts";
+import { plural } from "../output.ts";
 import { formatStandard, ownersOf, type ProjectModel, type ProjectTarget } from "./model.ts";
 
 /** The briefing stays within this many characters (R7); larger projects get the summary form. */
@@ -117,7 +118,8 @@ function configureSection(input: BriefingInput): string[] {
 // ---------------------------------------------------------------------------
 // Targets
 
-function ownedDirectories(root: string, target: ProjectTarget): string[] {
+/** The directories holding the target's non-generated sources, or its definition directory when none. */
+export function ownedDirectories(root: string, target: ProjectTarget): string[] {
   const dirs = [...new Set(target.sources.filter(source => !source.isGenerated).map(source => displayPath(root, dirname(source.path))))].sort();
   return dirs.length > 0 ? dirs : [displayPath(root, target.sourceDir)];
 }
@@ -128,8 +130,6 @@ function targetRow(root: string, target: ProjectTarget): string {
   const deps = target.dependencies.length > 0 ? target.dependencies.join(", ") : "-";
   return `| ${target.name} | ${target.kind} | ${shown} | ${formatStandard(target.cxxStandard)} | ${deps} |`;
 }
-
-const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
 function header(input: BriefingInput): string[] {
   const { model, result } = input;

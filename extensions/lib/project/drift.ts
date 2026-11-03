@@ -1,8 +1,8 @@
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { basename, dirname, extname, join, resolve, sep } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import type { Exec, MissingSource } from "./configure.ts";
 import {
-  bestRealPath, declaringLocation, isInSkippedDir, ownersOf,
+  bestRealPath, declaringLocation, isWithin, ownersOf, skippedDirCheck,
   type DeclaringLocation, type ProjectModel, type ProjectSource, type ProjectTarget,
 } from "./model.ts";
 import { projectCacheDir } from "./root.ts";
@@ -83,8 +83,6 @@ export interface ScanDriftOptions {
 // ---------------------------------------------------------------------------
 // Candidates (KTD6)
 
-const isWithin = (dir: string, path: string) => path === dir || path.startsWith(dir.endsWith(sep) ? dir : dir + sep);
-
 type Collected = { mode: "git" | "walk"; files: string[] } | "timeout";
 
 async function gitListing(root: string, exec: Exec, deadline: number, signal?: AbortSignal): Promise<string[] | "timeout" | undefined> {
@@ -140,11 +138,12 @@ async function collectCandidates(root: string, model: ProjectModel, exec: Exec, 
   const excluded = [model.buildDir];
   try { excluded.push(projectCacheDir(root)); } catch { /* the root vanished; nothing to exclude */ }
   const skippedDirs = new Map<string, boolean>();
+  const inSkippedDir = skippedDirCheck(root);
   // Directories, not files, go through the skip set: a file named build.cpp is still a source.
   const keepDir = (dir: string) => {
     let skipped = skippedDirs.get(dir);
     if (skipped === undefined) {
-      skipped = excluded.some(path => isWithin(path, dir)) || isInSkippedDir(root, dir);
+      skipped = excluded.some(path => isWithin(path, dir)) || inSkippedDir(dir);
       skippedDirs.set(dir, skipped);
     }
     return !skipped;
@@ -348,7 +347,15 @@ export async function scanDrift(options: ScanDriftOptions): Promise<DriftReport>
   const cmakeTexts = () => inputs ??= model.cmakeInputs
     .filter(file => basename(file) === "CMakeLists.txt" || file.endsWith(".cmake"))
     .map(file => ({ file, lines: textOf(file).split(/\r?\n/).map(stripComment) }));
-  const hasGlob = (file: string) => GLOB_COMMAND.test(textOf(file).split(/\r?\n/).map(stripComment).join("\n"));
+  const globs = new Map<string, boolean>();
+  const hasGlob = (file: string) => {
+    let found = globs.get(file);
+    if (found === undefined) {
+      found = GLOB_COMMAND.test(textOf(file).split(/\r?\n/).map(stripComment).join("\n"));
+      globs.set(file, found);
+    }
+    return found;
+  };
 
   const findings: DriftFinding[] = [...missing];
   const referenced: ReferencedSource[] = [];
@@ -400,6 +407,11 @@ export class FindingsLedger {
     const resolved = [...this.reported].filter(([key]) => !current.has(key)).map(([, finding]) => finding);
     this.reported = current;
     return { new: added.sort(byPathThenKind), resolved: resolved.sort(byPathThenKind), open: this.open };
+  }
+
+  /** Whether the finding with this findingKey is open. */
+  has(key: string): boolean {
+    return this.reported.has(key);
   }
 
   /** Findings currently open, for the briefing. */
