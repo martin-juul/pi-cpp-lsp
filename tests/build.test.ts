@@ -1,25 +1,28 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { cpSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
+import extension from "../extensions/index.ts";
 import { registerBuildTools } from "../extensions/lib/build.ts";
+import type { ProjectModel } from "../extensions/lib/project/model.ts";
 
 type Tool = {
   name: string;
   execute: (id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, update: undefined, ctx: { cwd: string }) => Promise<{
     content: { type: string; text: string }[];
-    details: { command: string; args: string[]; exitCode: number | null; success: boolean; killed: boolean; cancelled: boolean; timedOut: boolean; truncated: boolean; logFile?: string };
+    details: { command: string; args: string[]; build_dir: string; exitCode: number | null; success: boolean; killed: boolean; cancelled: boolean; timedOut: boolean; truncated: boolean; logFile?: string };
     isError: boolean;
   }>;
 };
 type Exec = (command: string, args: string[], options?: ExecOptions) => Promise<ExecResult>;
 const success: ExecResult = { code: 0, stdout: "", stderr: "", killed: false };
-function setup(exec: Exec = async () => success) {
+function setup(exec: Exec = async () => success, project?: () => ProjectModel | undefined) {
   const tools = new Map<string, Tool>();
-  registerBuildTools({ exec, registerTool: (tool: Tool) => tools.set(tool.name, tool) } as unknown as ExtensionAPI);
+  registerBuildTools({ exec, registerTool: (tool: Tool) => tools.set(tool.name, tool) } as unknown as ExtensionAPI, project);
   return (name: string, params: Record<string, unknown> = {}, signal?: AbortSignal, cwd = "/project with spaces") => tools.get(name)!.execute("call", params, signal, undefined, { cwd });
 }
 
@@ -179,4 +182,157 @@ add_test(NAME executable_passes COMMAND working)
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+// ── Managed project defaults and cpp_run (KTD16, KTD17) ─────────────────────
+
+const managedModel = { sourceRoot: "/src", buildDir: "/cache/pi-cpp-lsp/abc/builds/default", targets: [] } as unknown as ProjectModel;
+
+test("build and test default to the managed directory when the model is ready, otherwise to build, and say which", async () => {
+  const calls: string[][] = [];
+  const exec: Exec = async (_command, args) => { calls.push(args); return success; };
+  let model: ProjectModel | undefined = managedModel;
+  const run = setup(exec, () => model);
+
+  let result = await run("cpp_build", { target: "app" });
+  assert.deepEqual(calls.at(-1), ["--build", managedModel.buildDir, "--target", "app"]);
+  assert.equal(result.details.build_dir, managedModel.buildDir);
+  assert.ok(result.content[0].text.includes(managedModel.buildDir), result.content[0].text);
+  result = await run("cpp_test");
+  assert.deepEqual(calls.at(-1), ["--test-dir", managedModel.buildDir, "--output-on-failure", "--no-tests=error"]);
+  assert.ok(result.content[0].text.includes(managedModel.buildDir), result.content[0].text);
+
+  model = undefined;
+  result = await run("cpp_build");
+  assert.deepEqual(calls.at(-1), ["--build", "build"]);
+  assert.match(result.content[0].text, /Build directory: build\b/);
+  result = await run("cpp_test");
+  assert.deepEqual(calls.at(-1), ["--test-dir", "build", "--output-on-failure", "--no-tests=error"]);
+});
+
+test("an explicit build_dir always wins over the managed directory", async () => {
+  const calls: string[][] = [];
+  const run = setup(async (_command, args) => { calls.push(args); return success; }, () => managedModel);
+  const result = await run("cpp_build", { build_dir: "out" });
+  assert.deepEqual(calls.at(-1), ["--build", "out"]);
+  assert.match(result.content[0].text, /Build directory: out\b/);
+  await run("cpp_test", { build_dir: "out" });
+  assert.deepEqual(calls.at(-1), ["--test-dir", "out", "--output-on-failure", "--no-tests=error"]);
+});
+
+// A child_process executor with pi.exec's contract: no shell, kill on abort or timeout.
+const nodeExec: Exec = (command, args, options = {}) => new Promise<ExecResult>(resolve => {
+  let stdout = "", stderr = "", killed = false;
+  const child = spawn(command, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+  const kill = () => { killed = true; child.kill("SIGKILL"); };
+  if (options.signal?.aborted) kill(); else options.signal?.addEventListener("abort", kill, { once: true });
+  const timer = options.timeout ? setTimeout(kill, options.timeout) : undefined;
+  child.stdout.on("data", data => { stdout += data; });
+  child.stderr.on("data", data => { stderr += data; });
+  child.on("error", () => { clearTimeout(timer); resolve({ stdout, stderr, code: 127, killed }); });
+  child.on("close", code => { clearTimeout(timer); resolve({ stdout, stderr, code: code ?? 1, killed }); });
+});
+
+const fixtures = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "cmake");
+const hasCxx = spawnSync("c++", ["--version"]).status === 0;
+
+/** A real extension session on a temp copy of the multi fixture, with the managed cache in a temp XDG_CACHE_HOME. */
+async function multiSession(t: { after: (fn: () => unknown) => void }) {
+  const previousCache = process.env.XDG_CACHE_HOME;
+  const cache = realpathSync(mkdtempSync(join(tmpdir(), "pi-cpp-cache-")));
+  process.env.XDG_CACHE_HOME = cache;
+  const root = join(realpathSync(mkdtempSync(join(tmpdir(), "pi-cpp-run-"))), "multi");
+  cpSync(join(fixtures, "multi"), root, { recursive: true });
+  writeFileSync(join(root, "app", "main.cpp"), `#include "legacy.h"
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <thread>
+int main(int argc, char** argv) {
+  if (argc > 1 && std::strcmp(argv[1], "sleep") == 0) std::this_thread::sleep_for(std::chrono::seconds(30));
+  std::printf("cwd:%s\\n", std::filesystem::current_path().c_str());
+  for (int i = 1; i < argc; ++i) std::printf("arg:%s\\n", argv[i]);
+  if (argc > 1 && std::strcmp(argv[1], "fail") == 0) return 3;
+  return legacy_value() == 42 ? 0 : 1;
+}
+`);
+  const handlers = new Map<string, ((event: unknown, ctx: unknown) => unknown)[]>();
+  const tools = new Map<string, Tool>();
+  extension({
+    exec: nodeExec,
+    registerTool(tool: Tool) { tools.set(tool.name, tool); },
+    registerCommand() {},
+    on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+  } as unknown as ExtensionAPI);
+  const ctx = { cwd: root, ui: { notify() {} } };
+  const emit = async (name: string, event: Record<string, unknown>) => {
+    for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx);
+  };
+  t.after(async () => {
+    await emit("session_shutdown", { reason: "quit" });
+    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = previousCache;
+    rmSync(dirname(root), { recursive: true, force: true });
+    rmSync(cache, { recursive: true, force: true });
+  });
+  await emit("session_start", { reason: "startup" });
+  // The first run waits for the initial configure and loads the model.
+  await emit("before_agent_start", { prompt: "hi", messageType: "user", systemPrompt: "", systemPromptOptions: { promptGuidelines: [] } });
+  const call = (name: string, params: Record<string, unknown> = {}, signal?: AbortSignal) => tools.get(name)!.execute("call", params, signal, undefined, { cwd: root });
+  return { root, cache, call };
+}
+
+test("real CMake: cpp_build and cpp_run use the managed directory and run the fixture executable", { skip: !hasCmake || !hasCxx }, async t => {
+  const { root, cache, call } = await multiSession(t);
+
+  const unbuilt = await call("cpp_run", { target: "app" });
+  assert.equal(unbuilt.isError, true);
+  assert.match(unbuilt.content[0].text, /not been built/);
+  assert.match(unbuilt.content[0].text, /cpp_build/);
+
+  const library = await call("cpp_run", { target: "legacy" });
+  assert.equal(library.isError, true);
+  assert.match(library.content[0].text, /library/);
+  assert.match(library.content[0].text, /cpp_build/);
+
+  const built = await call("cpp_build", { target: "app" });
+  assert.equal(built.isError, false, built.content[0].text);
+  assert.ok(built.details.build_dir.startsWith(join(cache, "pi-cpp-lsp")), built.details.build_dir);
+  assert.ok(built.content[0].text.includes(built.details.build_dir), built.content[0].text);
+  assert.equal(existsSync(join(root, "build")), false);
+
+  const ran = await call("cpp_run", { target: "app", args: ["one", "two words"] });
+  assert.equal(ran.isError, false, ran.content[0].text);
+  assert.equal(ran.details.exitCode, 0);
+  assert.match(ran.content[0].text, new RegExp(`^cwd:${root}$`, "m"));
+  assert.match(ran.content[0].text, /arg:one\narg:two words/);
+  assert.ok(ran.content[0].text.includes(built.details.build_dir), ran.content[0].text);
+
+  const elsewhere = await call("cpp_run", { target: "app", cwd: "libs" });
+  assert.match(elsewhere.content[0].text, new RegExp(`^cwd:${join(root, "libs")}$`, "m"));
+
+  const failed = await call("cpp_run", { target: "app", args: ["fail"] });
+  assert.equal(failed.isError, true);
+  assert.equal(failed.details.exitCode, 3);
+  assert.match(failed.content[0].text, /failed \(exit code 3\)/);
+  assert.match(failed.content[0].text, /arg:fail/);
+
+  const timedOut = await call("cpp_run", { target: "app", args: ["sleep"], timeout_ms: 300 });
+  assert.equal(timedOut.isError, true);
+  assert.equal(timedOut.details.timedOut, true);
+  assert.equal(timedOut.details.cancelled, false);
+  assert.match(timedOut.content[0].text, /stopped after timeout \(300 ms\)/);
+
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 300);
+  const cancelled = await call("cpp_run", { target: "app", args: ["sleep"] }, controller.signal);
+  assert.equal(cancelled.isError, true);
+  assert.equal(cancelled.details.cancelled, true);
+  assert.equal(cancelled.details.timedOut, false);
+  assert.match(cancelled.content[0].text, /cancelled/);
+
+  const explicit = await call("cpp_build", { build_dir: "build" });
+  assert.equal(explicit.isError, true);
+  assert.equal(explicit.details.build_dir, "build");
+  assert.match(explicit.content[0].text, /Build directory: build\b/);
 });

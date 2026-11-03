@@ -1,15 +1,27 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { boundedOutput } from "./output.ts";
+import { findTarget, type ProjectModel } from "./project/model.ts";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
+/** Today's default when no CMake project model is ready (R27). */
+const FALLBACK_BUILD_DIR = "build";
 
+/**
+ * The project model the build tools default to: the session's ready CMake model, or undefined to keep
+ * today's defaults (KTD16). Read on every call, so it follows reconfigures and new sessions.
+ */
+export type ProjectModelSource = () => ProjectModel | undefined;
+
+const timeoutParameter = Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS, description: "Command timeout in milliseconds (default: 120000, maximum: 600000)" }));
 const commonParameters = {
-  build_dir: Type.Optional(Type.String({ minLength: 1, description: "Configured CMake build directory (default: build)" })),
+  build_dir: Type.Optional(Type.String({ minLength: 1, description: "Configured CMake build directory (default: the extension's managed build directory when the CMake project model is ready, otherwise build)" })),
   config: Type.Optional(Type.String({ minLength: 1, description: "Build configuration, for example Debug or Release" })),
   parallel: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum parallel jobs" })),
-  timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS, description: "Command timeout in milliseconds (default: 120000, maximum: 600000)" })),
+  timeout_ms: timeoutParameter,
 };
 
 interface Parameters {
@@ -21,33 +33,51 @@ interface Parameters {
   regex?: string;
 }
 
-export function registerBuildTools(pi: ExtensionAPI): void {
-  async function run(command: "cmake" | "ctest", params: Parameters, signal: AbortSignal | undefined, cwd: string) {
-    const buildDir = params.build_dir ?? "build";
-    const timeout = params.timeout_ms ?? DEFAULT_TIMEOUT_MS;
-    const args = command === "cmake"
-      ? ["--build", buildDir]
-      : ["--test-dir", buildDir, "--output-on-failure", "--no-tests=error"];
-    if (command === "cmake" && params.target !== undefined) args.push("--target", params.target);
-    if (command === "ctest" && params.regex !== undefined) args.push("--tests-regex", params.regex);
-    if (params.config !== undefined) args.push(command === "cmake" ? "--config" : "--build-config", params.config);
-    if (params.parallel !== undefined) args.push("--parallel", String(params.parallel));
+interface RunParameters {
+  target: string;
+  args?: string[];
+  cwd?: string;
+  timeout_ms?: number;
+}
 
+/** One bounded process run: what to execute and the build directory it belongs to. */
+interface Invocation {
+  /** Names the process in the result text, e.g. "cmake" or the target. */
+  label: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  buildDir: string;
+  timeout_ms?: number;
+  parallel?: number;
+  target?: string;
+}
+
+export function registerBuildTools(pi: ExtensionAPI, project: ProjectModelSource = () => undefined): void {
+  /** Explicit build_dir wins; otherwise the ready model's managed directory, otherwise "build" (KTD16). */
+  const buildDirFor = (params: Parameters) => params.build_dir ?? project()?.buildDir ?? FALLBACK_BUILD_DIR;
+
+  // Bounded output, timeout and cancellation shared by cpp_build, cpp_test and cpp_run.
+  async function execute(invocation: Invocation, signal: AbortSignal | undefined) {
+    const { label, command, args, cwd, buildDir, parallel } = invocation;
+    const timeout = invocation.timeout_ms ?? DEFAULT_TIMEOUT_MS;
     const details = {
       command, args, cwd, build_dir: buildDir, timeout_ms: timeout,
+      ...(invocation.target === undefined ? {} : { target: invocation.target }),
       exitCode: null as number | null, success: false, killed: false,
       cancelled: false, timedOut: false, truncated: false, logFile: undefined as string | undefined,
     };
+    const where = `Build directory: ${buildDir}`;
     const failure = (text: string) => ({ content: [{ type: "text" as const, text }], details, isError: true });
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > MAX_TIMEOUT_MS) {
       return failure(`timeout_ms must be an integer from 1 to ${MAX_TIMEOUT_MS}.`);
     }
-    if (params.parallel !== undefined && (!Number.isInteger(params.parallel) || params.parallel < 1)) {
+    if (parallel !== undefined && (!Number.isInteger(parallel) || parallel < 1)) {
       return failure("parallel must be a positive integer.");
     }
     if (signal?.aborted) {
       details.cancelled = true;
-      return failure(`${command} cancelled before execution.`);
+      return failure(`${label} cancelled before execution. ${where}`);
     }
     try {
       const result = await pi.exec(command, args, { cwd, signal, timeout });
@@ -60,17 +90,54 @@ export function registerBuildTools(pi: ExtensionAPI): void {
         : details.timedOut ? `stopped after timeout (${timeout} ms)`
         : details.success ? "succeeded" : `failed (exit code ${result.code})`;
       const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-      const bounded = boundedOutput(`${command} ${status}.${output ? `\n${output}` : ""}`);
+      const bounded = boundedOutput(`${label} ${status}. ${where}${output ? `\n${output}` : ""}`);
       details.truncated = bounded.truncated;
       details.logFile = bounded.logFile;
       return { content: [{ type: "text" as const, text: bounded.text }], details, isError: !details.success };
     } catch (error) {
       details.cancelled = signal?.aborted ?? false;
-      const bounded = boundedOutput(`${command} ${details.cancelled ? "cancelled" : "could not execute"}: ${error instanceof Error ? error.message : String(error)}`);
+      const bounded = boundedOutput(`${label} ${details.cancelled ? "cancelled" : "could not execute"}: ${error instanceof Error ? error.message : String(error)}\n${where}`);
       details.truncated = bounded.truncated;
       details.logFile = bounded.logFile;
       return failure(bounded.text);
     }
+  }
+
+  async function run(command: "cmake" | "ctest", params: Parameters, signal: AbortSignal | undefined, cwd: string) {
+    const buildDir = buildDirFor(params);
+    const args = command === "cmake"
+      ? ["--build", buildDir]
+      : ["--test-dir", buildDir, "--output-on-failure", "--no-tests=error"];
+    if (command === "cmake" && params.target !== undefined) args.push("--target", params.target);
+    if (command === "ctest" && params.regex !== undefined) args.push("--tests-regex", params.regex);
+    if (params.config !== undefined) args.push(command === "cmake" ? "--config" : "--build-config", params.config);
+    if (params.parallel !== undefined) args.push("--parallel", String(params.parallel));
+    return execute({ label: command, command, args, cwd, buildDir, timeout_ms: params.timeout_ms, parallel: params.parallel }, signal);
+  }
+
+  /** Resolves the target's executable from the model (KTD17) and runs it like cpp_build runs cmake. */
+  async function runTarget(params: RunParameters, signal: AbortSignal | undefined, sessionCwd: string) {
+    const error = (text: string) => ({
+      content: [{ type: "text" as const, text }], details: { target: params.target, error: true }, isError: true,
+    });
+    const model = project();
+    if (!model) {
+      return error("cpp_run needs the CMake project model, which is not available: this is not a CMake project, or its first configure has not finished or failed.");
+    }
+    const target = findTarget(model, params.target);
+    if (!target) {
+      const runnable = model.targets.filter(candidate => candidate.kind === "executable" || candidate.kind === "test").map(candidate => candidate.name);
+      return error(`Unknown target ${params.target}. Executable targets: ${runnable.join(", ") || "none"}.`);
+    }
+    if (target.kind !== "executable" && target.kind !== "test") {
+      return error(`${target.name} is a ${target.kind} target (${target.type}), not an executable, so it cannot be run. Build it with cpp_build, and run an executable target that uses it.`);
+    }
+    const executable = target.artifacts[0];
+    if (executable === undefined || !existsSync(executable)) {
+      return error(`${target.name} has not been built${executable ? `: ${executable} does not exist` : ""}. Build it first with cpp_build (target: ${target.name}).`);
+    }
+    const cwd = params.cwd === undefined ? model.sourceRoot : resolve(sessionCwd, params.cwd);
+    return execute({ label: target.name, command: executable, args: params.args ?? [], cwd, buildDir: model.buildDir, timeout_ms: params.timeout_ms, target: target.name }, signal);
   }
 
   pi.registerTool({
@@ -97,6 +164,21 @@ export function registerBuildTools(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       return run("ctest", params, signal, ctx.cwd);
+    },
+  });
+  pi.registerTool({
+    name: "cpp_run",
+    label: "C++ Run",
+    description: "Run a built executable target of the CMake project with arguments. Resolves the executable from the project model; build it first with cpp_build.",
+    promptSnippet: "Run a CMake executable target with arguments, a working directory and a timeout",
+    parameters: Type.Object({
+      target: Type.String({ minLength: 1, description: "Executable target to run" }),
+      args: Type.Optional(Type.Array(Type.String(), { description: "Arguments passed to the executable" })),
+      cwd: Type.Optional(Type.String({ minLength: 1, description: "Working directory (default: the CMake source root)" })),
+      timeout_ms: timeoutParameter,
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      return runTarget(params, signal, ctx.cwd);
     },
   });
 }

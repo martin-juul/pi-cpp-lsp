@@ -56,7 +56,9 @@ function truncateOutput(output: string): string {
 }
 
 export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
-  registerBuildTools(pi);
+  // Tools without an explicit build_dir default to the session's ready CMake model (KTD16).
+  const projectModel = () => project?.model;
+  registerBuildTools(pi, projectModel);
   registerClangdTools(pi);
   // pi.exec never throws: a missing binary resolves with a non-zero exit code,
   // so check availability explicitly before running a tool.
@@ -185,7 +187,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
     ],
     parameters: Type.Object({
       file: Type.String({ description: "Path to the C/C++ source file to check" }),
-      build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json (default: auto-detect project root or build/)" })),
+      build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json (default: the managed CMake build directory when the project model is ready, otherwise auto-detect project root or build/)" })),
       tool: Type.Optional(
         Type.String({
           description: "Which tool to use: 'clang-tidy', 'cppcheck', or 'all' (default: 'all')",
@@ -197,7 +199,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
       const file = resolve(ctx.cwd, params.file);
       let database: string | undefined;
       try {
-        database = findCompilationDatabase(ctx.cwd, file, params.build_dir);
+        database = findCompilationDatabase(ctx.cwd, file, params.build_dir ?? projectModel()?.buildDir);
       } catch (err) {
         return { content: [{ type: "text", text: (err as Error).message }], details: { file, error: true }, isError: true };
       }
@@ -253,7 +255,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
       }
 
       return {
-        content: [{ type: "text", text: truncateOutput(results.join("\n\n")) }],
+        content: [{ type: "text", text: truncateOutput(`Compilation database: ${database ?? "none found"}\n\n${results.join("\n\n")}`) }],
         details: { file: params.file, tool, database, success: !failed },
         isError: failed,
       };
@@ -272,7 +274,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
     ],
     parameters: Type.Object({
       file: Type.String({ description: "Path to the C/C++ source file to compile" }),
-      build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json (default: auto-detect project root or build/)" })),
+      build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json (default: the managed CMake build directory when the project model is ready, otherwise auto-detect project root or build/)" })),
       standard: Type.Optional(
         Type.String({
           description: "Override the compilation database language standard (standalone defaults: c17 for .c, c++17 otherwise)",
@@ -286,7 +288,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       try {
-        const invocation = resolveCompileInvocation(ctx.cwd, params);
+        const invocation = resolveCompileInvocation(ctx.cwd, { ...params, build_dir: params.build_dir ?? projectModel()?.buildDir });
         const { compiler, args, cwd, database } = invocation;
         const result = await pi.exec(compiler, args, { signal, cwd, timeout: 30000 });
         const success = result.code === 0 && !result.killed && !signal?.aborted;

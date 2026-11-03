@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { findCompilationDatabase, resolveCompileInvocation, splitCommand, syntaxArguments } from "../extensions/lib/compdb.ts";
 
 function fixture(t: { after: (fn: () => void) => void }) {
@@ -138,4 +139,61 @@ test("tool registrations forward database arguments/cwd and clang-tidy -p, and r
   assert.match(result.content[0].text, /interrupted/);
   result = await check.execute("id", { file: "src/a.cpp", tool: "unknown" }, signal, undefined, { cwd: root });
   assert.equal(result.isError, true);
+});
+
+test("without build_dir, cpp_compile and cpp_check use the managed compile_commands.json of a ready CMake model", async (t) => {
+  if (spawnSync("cmake", ["--version"]).status !== 0 || spawnSync("c++", ["--version"]).status !== 0) { t.skip("cmake or a C++ compiler is not installed"); return; }
+  const { default: register } = await import("../extensions/index.ts");
+  const previousCache = process.env.XDG_CACHE_HOME;
+  const cache = realpathSync(mkdtempSync(join(tmpdir(), "pi-cpp-cache-")));
+  process.env.XDG_CACHE_HOME = cache;
+  const root = join(realpathSync(mkdtempSync(join(tmpdir(), "cpp-compdb-managed-"))), "multi");
+  cpSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures", "cmake", "multi"), root, { recursive: true });
+  // Compiles only with the define the legacy library exports to app.
+  writeFileSync(join(root, "app", "main.cpp"), '#include "legacy.h"\nstatic_assert(LEGACY_API == 1, "needs the project define");\nint main() { return legacy_value() == 42 ? 0 : 1; }\n');
+  // A stale database in the old default location must not be picked.
+  mkdirSync(join(root, "build"));
+  writeFileSync(join(root, "build", "compile_commands.json"), "[]");
+
+  const handlers = new Map<string, any[]>();
+  const registered = new Map<string, any>();
+  const execs: { name: string; args: string[] }[] = [];
+  const exec = (name: string, args: string[], options: any = {}) => {
+    execs.push({ name, args });
+    const result = spawnSync(name, args, { cwd: options.cwd, timeout: options.timeout, encoding: "utf8" });
+    return Promise.resolve({ stdout: result.stdout ?? "", stderr: result.stderr ?? "", code: result.status ?? 1, killed: result.signal !== null });
+  };
+  register({
+    exec, registerCommand() {}, registerTool(tool: any) { registered.set(tool.name, tool); },
+    on(name: string, handler: any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+  } as any);
+  const ctx = { cwd: root, ui: { notify() {} } };
+  const emit = async (name: string, event: object) => { for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx); };
+  t.after(async () => {
+    await emit("session_shutdown", { reason: "quit" });
+    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = previousCache;
+    rmSync(dirname(root), { recursive: true, force: true });
+    rmSync(cache, { recursive: true, force: true });
+  });
+  await emit("session_start", { reason: "startup" });
+  await emit("before_agent_start", { prompt: "hi", messageType: "user", systemPrompt: "", systemPromptOptions: { promptGuidelines: [] } });
+
+  const managed = join(cache, "pi-cpp-lsp");
+  const compiled = await registered.get("cpp_compile").execute("id", { file: "app/main.cpp" }, undefined, undefined, ctx);
+  assert.equal(compiled.isError, false, compiled.content[0].text);
+  assert.ok(compiled.details.database.startsWith(managed), compiled.details.database);
+  assert.ok(compiled.content[0].text.includes(compiled.details.database), compiled.content[0].text);
+  assert.ok(compiled.details.args.includes("-DLEGACY_API=1"), compiled.details.args.join(" "));
+
+  // An explicit build_dir still wins.
+  const explicit = await registered.get("cpp_compile").execute("id", { file: "app/main.cpp", build_dir: "build" }, undefined, undefined, ctx);
+  assert.equal(explicit.isError, true);
+  assert.match(explicit.content[0].text, /No compilation database entry/);
+
+  const checked = await registered.get("cpp_check").execute("id", { file: "app/main.cpp", tool: "clang-tidy" }, undefined, undefined, ctx);
+  assert.ok(checked.details.database.startsWith(managed), checked.details.database);
+  assert.ok(checked.content[0].text.includes(checked.details.database), checked.content[0].text);
+  if (execs.some(call => call.name === "clang-tidy")) {
+    assert.deepEqual(execs.findLast(call => call.name === "clang-tidy")?.args.slice(-2), ["-p", dirname(checked.details.database)]);
+  }
 });
