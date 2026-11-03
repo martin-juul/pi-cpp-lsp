@@ -259,9 +259,28 @@ interface CmakeText {
 }
 
 /**
- * The first CMake input line that names `path`. A reference after a variable (`${DIR}/x.cpp`)
- * matches by suffix; a literal one must resolve to `path` from the CMake file's directory or the
- * root, so a registered `main.cpp` elsewhere does not hide a new `tools/main.cpp`.
+ * The directories a relative source in `file` resolves against: a CMakeLists.txt's own directory;
+ * for an included module the including directory, which is unknown, so its own and the root.
+ */
+const sourceDirs = (file: string, root: string) => basename(file) === "CMakeLists.txt" ? [dirname(file)] : [dirname(file), root];
+
+/**
+ * The directories a reference after `${name}` in `file` is relative to: [] for a build-tree variable,
+ * which never names a source-tree file, and undefined for a variable this scan does not know.
+ */
+function variableBases(name: string, file: string, root: string): string[] | undefined {
+  if (name.endsWith("_BINARY_DIR")) return [];
+  if (name === "CMAKE_CURRENT_LIST_DIR") return [dirname(file)];
+  if (name === "CMAKE_SOURCE_DIR" || name === "PROJECT_SOURCE_DIR") return [root];
+  if (name === "CMAKE_CURRENT_SOURCE_DIR") return sourceDirs(file, root);
+  return undefined;
+}
+
+/**
+ * The first CMake input line that names `path`. A reference after a known directory variable
+ * (`${CMAKE_CURRENT_SOURCE_DIR}/x.cpp`) or a literal one must resolve to `path`, so a registered
+ * `main.cpp` elsewhere does not hide a new `tools/main.cpp`. After an unknown variable, at least a
+ * directory and the file name must match as a suffix.
  */
 function findReference(path: string, root: string, inputs: readonly CmakeText[]): ReferencedSource | undefined {
   const name = basename(path);
@@ -274,9 +293,16 @@ function findReference(path: string, root: string, inputs: readonly CmakeText[])
         let start = at;
         while (start > 0 && PATH_CHAR.test(line[start - 1])) start--;
         const token = line.slice(start, end);
-        const matches = line[start - 1] === "}"
-          ? path.endsWith(token.startsWith("/") ? token : `/${token}`)
-          : resolve(dirname(file), token) === path || resolve(root, token) === path;
+        let bases: string[] | undefined = sourceDirs(file, root);
+        let relativeToken = token;
+        if (line[start - 1] === "}") {
+          const open = line.lastIndexOf("${", start - 1);
+          bases = open < 0 ? undefined : variableBases(line.slice(open + 2, start - 1), file, root);
+          relativeToken = token.replace(/^\/+/, "");
+        }
+        const matches = bases === undefined
+          ? relativeToken.split("/").filter(Boolean).length >= 2 && path.endsWith(`/${relativeToken}`)
+          : bases.some(base => resolve(base, relativeToken) === path);
         if (matches) return { path, file, line: index + 1 };
       }
     }

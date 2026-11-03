@@ -6,7 +6,7 @@ import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
-import { ConfigureManager, probeCmake, resolvePreset, type ConfigureResult, type Exec } from "../extensions/lib/project/configure.ts";
+import { ConfigureManager, LOCK_MAX_AGE_MS, probeCmake, resolvePreset, type ConfigureResult, type Exec } from "../extensions/lib/project/configure.ts";
 import { buildLockPath, findSourceRoot, managedBuildDir, projectCacheDir, writeRememberedPreset } from "../extensions/lib/project/root.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -200,6 +200,16 @@ test("a deleted source listed in CMakeLists.txt fails configure with a missing f
   assert.match(result.output, /Cannot find source file/);
 });
 
+test("a missing source passed through a helper function is resolved and reported at the calling CMakeLists.txt", { skip: !hasCmake }, async () => {
+  freshCache();
+  const root = join(fixtures, "wrapper-missing");
+  const result = await new ConfigureManager({ root, exec: nodeExec }).trigger();
+
+  assert.equal(result.status, "failed");
+  assert.match(result.output, /CMake Error at cmake\/helpers\.cmake:2/);
+  assert.deepEqual(result.missingSources, [{ path: join(root, "lib", "gone.cpp"), file: join(root, "lib", "CMakeLists.txt"), line: 2 }]);
+});
+
 test("a failing reconfigure after a success keeps the last good reply index and marks the newest as an error", { skip: !hasCmake }, async () => {
   freshCache();
   const root = copyFixture("basic");
@@ -375,4 +385,40 @@ test("a stale lock left by a dead process is taken over", { skip: !hasCmake }, a
   assert.equal(result.status, "succeeded", result.output);
   assert.equal(result.reusedFromOtherSession, false);
   assert.equal(runs.length, 1);
+});
+
+// A lock left by a crashed pi whose PID now belongs to a live process (here: this test process).
+function writeLiveLock(root: string, startedAt: number): string {
+  const buildDir = managedBuildDir(root);
+  mkdirSync(dirname(buildDir), { recursive: true });
+  const lockPath = buildLockPath(buildDir);
+  writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startedAt }));
+  return lockPath;
+}
+
+test("a lock older than any configure can take is taken over even when its PID is alive", { skip: !hasCmake, timeout: 30_000 }, async () => {
+  freshCache();
+  const root = join(fixtures, "basic");
+  const lockPath = writeLiveLock(root, Date.now() - LOCK_MAX_AGE_MS - 60_000);
+
+  const { exec, runs } = counting();
+  const result = await new ConfigureManager({ root, exec }).trigger();
+  assert.equal(result.status, "succeeded", result.output);
+  assert.equal(result.reusedFromOtherSession, false);
+  assert.equal(runs.length, 1);
+  assert.equal(existsSync(lockPath), false, "the run releases the lock it took");
+});
+
+test("a waiting session takes over a live-PID lock once it outlives any configure", { skip: !hasCmake, timeout: 30_000 }, async () => {
+  freshCache();
+  const root = join(fixtures, "basic");
+  writeLiveLock(root, Date.now() - LOCK_MAX_AGE_MS + 1_000);
+
+  const { exec, runs } = counting();
+  const started = Date.now();
+  const result = await new ConfigureManager({ root, exec }).trigger();
+  assert.equal(result.status, "succeeded", result.output);
+  assert.equal(result.reusedFromOtherSession, false);
+  assert.equal(runs.length, 1);
+  assert.ok(Date.now() - started >= 800, "it waited while the lock was still young enough to be live");
 });

@@ -265,6 +265,22 @@ test("a source referenced only under an inactive condition is reported as refere
   assert.deepEqual(delta.open.map(f => relative(p.root, f.path)), ["tools/main.cpp"]);
 });
 
+test("a new file sharing a basename with a directory-variable or literal reference elsewhere is still unregistered", { skip: !hasCmake }, async () => {
+  // gated lists ${CMAKE_CURRENT_SOURCE_DIR}/extra/feature.cpp, which is the root's extra/, not tools/extra/.
+  const gated = await project("gated");
+  write(gated.root, "tools/extra/feature.cpp");
+  const gatedReport = await scan(gated);
+  assert.deepEqual(rel(gated.root, gatedReport.findings).map((f: any) => [f.kind, f.path]), [["unregistered", "tools/extra/feature.cpp"]]);
+  assert.deepEqual(gatedReport.referenced.map(r => relative(gated.root, r.path)), ["extra/feature.cpp", "platform/win_console.cpp"]);
+
+  // src/net/CMakeLists.txt lists connection.cpp, which CMake resolves in src/net/, never at the root.
+  const drift = await project("drift");
+  write(drift.root, "connection.cpp");
+  const driftReport = await scan(drift);
+  assert.deepEqual(rel(drift.root, driftReport.findings).map((f: any) => [f.kind, f.path]), [["unregistered", "connection.cpp"]]);
+  assert.deepEqual(driftReport.referenced, []);
+});
+
 // ---------------------------------------------------------------------------
 // Without real tools
 

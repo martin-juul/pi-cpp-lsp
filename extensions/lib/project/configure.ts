@@ -1,7 +1,7 @@
 import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { boundedOutput } from "../output.ts";
 import { buildLockPath, managedBuildDir, readProjectState } from "./root.ts";
@@ -11,6 +11,8 @@ export type Exec = (command: string, args: string[], options?: ExecOptions) => P
 
 export const CONFIGURE_TIMEOUT_MS = 300_000;
 const PROBE_TIMEOUT_MS = 30_000;
+/** A lock older than this is stale even when its PID is alive: a holder's probes and configure are killed sooner. */
+export const LOCK_MAX_AGE_MS = CONFIGURE_TIMEOUT_MS + 2 * PROBE_TIMEOUT_MS;
 const LOCK_POLL_MS = 200;
 
 /** The File API client name; the codemodel v2 and cmakeFiles v1 replies appear under this key. */
@@ -164,13 +166,26 @@ export interface MissingSource {
   line: number;
 }
 
-/** Turn `CMake Error at <file>:<line>` blocks reporting `Cannot find source file` into missing findings (KTD22). */
+/**
+ * Turn `CMake Error at <file>:<line>` blocks reporting `Cannot find source file` into missing findings (KTD22).
+ * When the error is reported inside a helper `.cmake` file, the first frame (the error itself, then its
+ * `Call Stack`) that is a CMakeLists.txt is the caller: CMake resolves the source against its directory.
+ */
 export function parseMissingSources(output: string, root: string): MissingSource[] {
   const pattern = /CMake Error at (.+):(\d+) \([^)\n]*\):\r?\n[ \t]*Cannot find source file:\r?\n(?:[ \t]*\r?\n)*[ \t]*(\S.*?)[ \t]*\r?$/gm;
   const found = new Map<string, MissingSource>();
+  const absolute = (file: string) => isAbsolute(file) ? file : resolve(root, file);
   for (const match of output.matchAll(pattern)) {
-    const file = isAbsolute(match[1]) ? match[1] : resolve(root, match[1]);
-    const missing: MissingSource = { path: resolve(dirname(file), match[3]), file, line: Number(match[2]) };
+    const frames = [{ file: absolute(match[1]), line: Number(match[2]) }];
+    const rest = output.slice(match.index + match[0].length);
+    const next = rest.search(/^CMake (Error|Warning|Deprecation)/m);
+    const block = next < 0 ? rest : rest.slice(0, next);
+    const stack = block.match(/^Call Stack \(most recent call first\):\r?\n((?:[ \t]+\S.*(?:\r?\n|$))*)/m);
+    for (const frame of stack?.[1].matchAll(/^[ \t]+(.+):(\d+) \([^)\n]*\)[ \t]*\r?$/gm) ?? []) {
+      frames.push({ file: absolute(frame[1]), line: Number(frame[2]) });
+    }
+    const { file, line } = frames.find(frame => basename(frame.file) === "CMakeLists.txt") ?? frames[0];
+    const missing: MissingSource = { path: resolve(dirname(file), match[3]), file, line };
     found.set(`${missing.path}\0${missing.file}\0${missing.line}`, missing);
   }
   return [...found.values()];
@@ -287,9 +302,13 @@ function isAlive(pid: number): boolean {
 
 const sameLock = (a: LockInfo, b: LockInfo) => a.pid === b.pid && a.startedAt === b.startedAt;
 
-function releaseLock(path: string, mine: LockInfo): void {
+/** A lock whose holder died, or that is older than any holder may keep it (its PID may since belong to another process). */
+const isStaleLock = (owner: LockInfo) => !isAlive(owner.pid) || Date.now() - owner.startedAt > LOCK_MAX_AGE_MS;
+
+/** Remove the lock only while it still holds `owner`, so a lock another session just took is kept. */
+function removeLock(path: string, owner: LockInfo | "corrupt"): void {
   const current = readLock(path);
-  if (typeof current === "object" && sameLock(current, mine)) rmSync(path, { force: true });
+  if (owner === "corrupt" ? current === "corrupt" : typeof current === "object" && sameLock(current, owner)) rmSync(path, { force: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -404,8 +423,8 @@ export class ConfigureManager {
       while (!(lock = tryLock(lockPath))) {
         const owner = readLock(lockPath);
         if (owner === "missing") continue;
-        if (owner === "corrupt" || !isAlive(owner.pid)) {
-          rmSync(lockPath, { force: true });
+        if (owner === "corrupt" || isStaleLock(owner)) {
+          removeLock(lockPath, owner);
           continue;
         }
         // Another session is configuring this directory: wait, then reuse its replies if it produced fresh ones.
@@ -416,7 +435,7 @@ export class ConfigureManager {
             return cancelled(common);
           }
           const current = readLock(lockPath);
-          if (typeof current !== "object" || !sameLock(current, owner) || !isAlive(owner.pid)) break;
+          if (typeof current !== "object" || !sameLock(current, owner) || isStaleLock(owner)) break;
         }
         const reply = readReplyState(buildDir, owner.startedAt);
         if (reply.newest && !reply.newestIsError && reply.newestFromThisRun) {
@@ -430,7 +449,7 @@ export class ConfigureManager {
       try {
         return await this.configure(buildDir, presets, notes);
       } finally {
-        releaseLock(lockPath, lock);
+        removeLock(lockPath, lock);
       }
     } catch (error) {
       return this.result({ status: "failed", output: `CMake configure could not run: ${error instanceof Error ? error.message : String(error)}` });

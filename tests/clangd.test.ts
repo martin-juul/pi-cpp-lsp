@@ -228,8 +228,16 @@ test("extra startup args follow the default flags", async t => {
   const extra = new ClangdConnection(cwd, undefined, { command: process.execPath, args: [fixture], extraArgs: ["--background-index"], timeoutMs: 1000 });
   t.after(() => extra.close());
   const extraArgv: string[] = await extra.request("mock/argv", null);
-  assert.ok(extraArgv.indexOf("--background-index") > extraArgv.indexOf("--background-index=false"));
+  assert.ok(extraArgv.includes("--background-index"));
+  assert.ok(!extraArgv.includes("--background-index=false"), "an extra arg replaces the default with the same name");
+  assert.ok(extraArgv.includes("--log=error"));
 });
+
+/** Flag names (the part before `=`) that occur more than once; clangd 14 and older refuse to start on a repeated flag. */
+function repeatedFlags(argv: string[]): string[] {
+  const names = argv.filter(arg => arg.startsWith("--")).map(arg => arg.split("=")[0]);
+  return [...new Set(names.filter((name, index) => names.indexOf(name) !== index))];
+}
 
 test("real clangd advertises references, rename, call and type hierarchy providers", { skip: !clangdAvailable }, async t => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-clangd-caps-"));
@@ -271,7 +279,8 @@ test("the managed connection starts with the index flags and opens a project sou
   const managed = await h.managed.connection();
   assert.ok(managed, "the managed connection starts when the model is ready");
   const argv: string[] = await managed.request("mock/argv", null);
-  assert.ok(argv.lastIndexOf("--background-index") > argv.indexOf("--background-index=false"));
+  assert.ok(argv.includes("--background-index"));
+  assert.deepEqual(repeatedFlags(argv), [], `each flag appears once: ${argv.join(" ")}`);
   assert.ok(argv.includes("--background-index-priority=low"));
   assert.ok(argv.includes("--rename-file-limit=0"));
   assert.ok(argv.includes(`--compile-commands-dir=${h.buildDir}`));

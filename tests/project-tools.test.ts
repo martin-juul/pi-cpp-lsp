@@ -119,6 +119,22 @@ test("cpp_project answers overview, targets, target and owner on the multi fixtu
   assert.match(stray.text, /no project target/i);
 });
 
+test("cpp_project owner of a C source in a mixed target does not report its C standard as C++", { skip: !hasCmake }, async t => {
+  freshCache();
+  const root = copyFixture("mixed-c");
+  const h = harness(t, root);
+  await settled(h.project);
+  assert.equal(h.project.status, "ready");
+
+  const c = await h.call({ action: "owner", path: "legacy.c" });
+  assert.equal(c.isError, false);
+  assert.match(c.text, /built by: app \(C\+\+17\)$/m);
+  assert.match(c.text, /Must stay valid for: compiler default/);
+  assert.doesNotMatch(c.text, /C\+\+11/);
+  const cpp = await h.call({ action: "owner", path: "main.cpp" });
+  assert.match(cpp.text, /Must stay valid for: C\+\+17/);
+});
+
 test("cpp_project target on an unknown name lists the valid names", { skip: !hasCmake }, async t => {
   freshCache();
   const root = copyFixture("multi");

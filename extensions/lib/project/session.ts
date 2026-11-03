@@ -327,7 +327,9 @@ export class ProjectService {
   isStale(): boolean {
     const root = this.root;
     if (!root || !this.manager) return false;
-    const baseline = Math.max(this.triggeredAt, this.result?.startedAt ?? 0);
+    // A pending trigger covers changes before it; once settled, the configure that produced the
+    // result is the baseline, which for one reused from another session started before the trigger.
+    const baseline = this.job ? Math.max(this.triggeredAt, this.result?.startedAt ?? 0) : this.result?.startedAt ?? this.triggeredAt;
     const inputs = this.currentModel
       ? [...this.currentModel.cmakeInputs, ...PRESET_FILES.map(name => join(root, name))]
       : this.allCmakeFiles(root);

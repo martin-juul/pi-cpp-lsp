@@ -333,6 +333,57 @@ test("a write during a slow reconfigure returns within the bound, and the outcom
   assert.match(followUp!, /Resolved: src\/net\/socket\.cpp/);
 });
 
+test("a configure reused from another session does not hide this session's CMake edit made during it", { skip: !hasCmake }, async t => {
+  freshCache();
+  const root = copyFixture("drift");
+  // Session A's configure runs cmake, then keeps the lock while the gate is closed.
+  let release: () => void = () => {};
+  let held: () => void = () => {};
+  const holdStarted = new Promise<void>(resolve => { held = resolve; });
+  let holding = false;
+  const holdAfter: Exec = async (command, args, options) => {
+    const result = await nodeExec(command, args, options);
+    if (command === "cmake" && args[0] === "-S" && holding) {
+      await new Promise<void>(resolve => { release = resolve; held(); });
+    }
+    return result;
+  };
+  const runsB: string[][] = [];
+  const countedB: Exec = (command, args, options) => {
+    if (command === "cmake" && args[0] === "-S") runsB.push(args);
+    return nodeExec(command, args, options);
+  };
+  const a = await session(t, root, { exec: holdAfter, waitMs: 5_000 });
+  await a.run();
+  const b = await session(t, root, { exec: countedB, waitMs: 5_000 });
+  await b.run();
+
+  holding = true;
+  const top = join(root, "CMakeLists.txt");
+  writeFileSync(top, readFileSync(top, "utf8"));
+  const aPending = a.toolResult("edit", { path: top });
+  await holdStarted;
+
+  // B edits CMakeLists.txt after A's configure read it; B's report point waits on A's lock and reuses A's replies.
+  write(root, "src/net/socket.cpp");
+  const lists = join(root, "src/net/CMakeLists.txt");
+  writeFileSync(lists, readFileSync(lists, "utf8").replace("connection.cpp", "connection.cpp socket.cpp"));
+  const runsBefore = runsB.length;
+  const bEdit = b.toolResult("edit", { path: lists });
+  await new Promise(resolve => setTimeout(resolve, 500));
+  holding = false;
+  release();
+  await aPending;
+  await bEdit;
+  assert.equal(runsB.length, runsBefore, "B reused A's configure");
+
+  // The next report point sees that B's edit is newer than the configure B reused.
+  await b.toolResult("bash", { command: "true" });
+  assert.equal(runsB.length, runsBefore + 1, "B reconfigures for its own edit");
+  const owner = await b.tools.get("cpp_project").execute("call", { action: "owner", path: join(root, "src/net/socket.cpp") }, undefined, undefined, { cwd: root });
+  assert.match(owner.content.map((part: any) => part.text).join(""), /is built by: net/);
+});
+
 test("session_shutdown during configure aborts it", { skip: !hasCmake }, async t => {
   freshCache();
   const gated = gatedExec();

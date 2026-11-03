@@ -177,6 +177,30 @@ test("a write failure on the third file restores the files already written", asy
   assert.deepEqual(await contents(files), before);
 });
 
+test("a write failure whose restore also fails lists exactly the files left renamed", async t => {
+  const names = ["a.cpp", "b.cpp", "c.cpp", "d.cpp"];
+  const original = (name: string) => `int name(); // ${name}\n`;
+  const h = await mockProject(t, "INDEX-END", Object.fromEntries(names.map(name => [name, original(name)])), root => ({
+    changes: Object.fromEntries(names.map(name => [uri(join(root, name)), [{ range: range(0, 4, 8), newText: "other" }]])),
+  }), {
+    write: async (file, text) => {
+      if (file.endsWith("c.cpp")) throw new Error("disk full");
+      if (file.endsWith("a.cpp") && text === original("a.cpp")) throw new Error("read-only now");
+      await writeFile(file, text);
+    },
+  });
+  const files = names.map(name => join(h.root, name));
+  const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "other" });
+  assert.equal(result.isError, true, result.text);
+  assert.match(result.text, /disk full/);
+  assert.match(result.text, /could not be restored/);
+  assert.equal(result.details.refused, false);
+  assert.deepEqual(result.details.unrestored, [files[0]]);
+  assert.ok(result.text.includes(files[0]!), result.text);
+  assert.ok(!result.text.includes(files[1]!), "a restored file is not listed");
+  assert.deepEqual(await contents(files), ["int other(); // a.cpp\n", original("b.cpp"), original("c.cpp"), original("d.cpp")]);
+});
+
 test("prepareRename refusal is returned and nothing changes", async t => {
   const h = await mockProject(t, "INDEX-END\nNO-RENAME", { "a.cpp": "int name();\n" }, root => ({
     changes: { [uri(join(root, "a.cpp"))]: [{ range: range(0, 4, 8), newText: "other" }] },

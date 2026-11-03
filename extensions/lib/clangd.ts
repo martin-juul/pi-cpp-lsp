@@ -12,7 +12,7 @@ const MAX_MESSAGE = 16 * 1024 * 1024;
 const MAX_OUTPUT = 24_000;
 type Message = { id?: number | string; method?: string; params?: any; result?: any; error?: { message: string; code?: number } };
 type Pending = { resolve(value: any): void; reject(error: Error): void; cleanup(): void };
-/** `args` precede the default flags; `extraArgs` follow them, so a repeated flag such as `--background-index` overrides the default. */
+/** `args` precede the default flags; `extraArgs` follow them, and a default whose flag name appears in `extraArgs` is left out. */
 export interface ClangdOptions { command?: string; args?: string[]; extraArgs?: string[]; timeoutMs?: number }
 export type IndexState = "not-started" | "indexing" | "idle";
 export interface Diagnostic { range: { start: { line: number; character: number }; end: { line: number; character: number } }; severity?: number; code?: number | string; source?: string; message: string; [key: string]: unknown }
@@ -90,8 +90,12 @@ export class ClangdConnection {
     this.cwd = cwd;
     this.buildDir = buildDir;
     this.options = options;
+    // clangd 14 and older reject a repeated flag, so an extra arg replaces the default of the same name.
+    const flagName = (arg: string) => arg.split("=")[0];
+    const overridden = new Set((options.extraArgs ?? []).map(flagName));
+    const defaults = ["--background-index=false", "--log=error"].filter(flag => !overridden.has(flagName(flag)));
     this.child = spawn(options.command ?? "clangd", [
-      ...(options.args ?? []), "--background-index=false", "--log=error",
+      ...(options.args ?? []), ...defaults,
       ...(buildDir ? [`--compile-commands-dir=${buildDir}`] : []),
       ...(options.extraArgs ?? []),
     ], { cwd, stdio: "pipe" });

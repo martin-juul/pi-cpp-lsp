@@ -25,7 +25,7 @@ export interface ProjectSource {
   isGenerated: boolean;
   /** Compile language, absent for sources that are not compiled (headers, rules). */
   language?: string;
-  /** Language standard of the source's compile group (KTD10); undefined means compiler default. */
+  /** C++ standard of the source's CXX compile group (KTD10); undefined means compiler default or a non-C++ source. */
   standard?: string;
   /** Frames from the leaf (the command that added the source) to the root. */
   backtrace: readonly BacktraceFrame[];
@@ -380,7 +380,8 @@ export async function loadProjectModel(options: LoadProjectModelOptions): Promis
       const entry: ProjectSource = { path, isGenerated: source.isGenerated === true || isWithin(buildDir, path), backtrace: backtrace(source.backtrace) };
       if (group && typeof group.language === "string") {
         entry.language = group.language;
-        const standard = groupStandard(group);
+        // Standards are reported as C++ standards, so a C group's standard is not recorded.
+        const standard = group.language === "CXX" ? groupStandard(group) : undefined;
         if (standard !== undefined) entry.standard = standard;
       }
       return entry;
