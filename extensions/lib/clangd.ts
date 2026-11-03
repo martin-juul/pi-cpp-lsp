@@ -9,7 +9,27 @@ const MAX_MESSAGE = 16 * 1024 * 1024;
 const MAX_OUTPUT = 24_000;
 type Message = { id?: number | string; method?: string; params?: any; result?: any; error?: { message: string; code?: number } };
 type Pending = { resolve(value: any): void; reject(error: Error): void; cleanup(): void };
-export interface ClangdOptions { command?: string; args?: string[]; timeoutMs?: number }
+/** `args` precede the default flags; `extraArgs` follow them, so a repeated flag such as `--background-index` overrides the default. */
+export interface ClangdOptions { command?: string; args?: string[]; extraArgs?: string[]; timeoutMs?: number }
+export type IndexState = "not-started" | "indexing" | "idle";
+export interface Diagnostic { range: { start: { line: number; character: number }; end: { line: number; character: number } }; severity?: number; code?: number | string; source?: string; message: string; [key: string]: unknown }
+/** "pending" means no diagnostics for the version arrived in time; it never means "no problems". */
+export type DiagnosticsResult = { status: "ready"; version: number; diagnostics: Diagnostic[] } | { status: "pending" };
+type DiagnosticsWaiter = { uri: string; version: number; resolve(result: DiagnosticsResult): void };
+
+/** clangd's work-done progress token for background indexing. */
+const INDEX_TOKEN = "backgroundIndexProgress";
+const METHOD_NOT_FOUND = -32601;
+
+/** The connected clangd does not implement an LSP method. */
+export class ClangdUnsupportedError extends Error {
+  readonly method: string;
+  constructor(method: string) {
+    super(`${method} is not supported by this clangd version`);
+    this.name = "ClangdUnsupportedError";
+    this.method = method;
+  }
+}
 
 function aborted(): Error { return new Error("clangd request cancelled"); }
 function checkSignal(signal?: AbortSignal) { if (signal?.aborted) throw aborted(); }
@@ -33,6 +53,12 @@ export class ClangdConnection {
   private documents = new Map<string, { text: string; version: number }>();
   private queue: Promise<unknown> = Promise.resolve();
   private ready: Promise<void>;
+  private capabilities: any = {};
+  private diagnostics = new Map<string, { version?: number; diagnostics: Diagnostic[] }>();
+  private diagnosticsWaiters = new Set<DiagnosticsWaiter>();
+  private index: IndexState = "not-started";
+  private indexWaiters = new Set<() => void>();
+  private unsupported = new Set<string>();
   private dead = false;
   private closing = false;
   get alive() { return !this.dead && !this.closing; }
@@ -48,6 +74,7 @@ export class ClangdConnection {
     this.child = spawn(options.command ?? "clangd", [
       ...(options.args ?? []), "--background-index=false", "--log=error",
       ...(buildDir ? [`--compile-commands-dir=${buildDir}`] : []),
+      ...(options.extraArgs ?? []),
     ], { cwd, stdio: "pipe" });
     this.child.stdout.on("data", (chunk: Buffer) => this.receive(chunk));
     this.child.stderr.on("data", (chunk: Buffer) => { this.stderr = (this.stderr + chunk.toString()).slice(-4000); });
@@ -61,11 +88,22 @@ export class ClangdConnection {
   }
 
   private async initialize() {
-    const result = await this.request("initialize", {
+    const result = await this.call("initialize", {
       processId: process.pid, rootUri: pathToFileURL(this.cwd).href,
       workspaceFolders: [{ uri: pathToFileURL(this.cwd).href, name: this.cwd }],
-      capabilities: { general: { positionEncodings: ["utf-16"] }, offsetEncoding: ["utf-16"], textDocument: { hover: { contentFormat: ["markdown", "plaintext"] } } },
+      capabilities: {
+        general: { positionEncodings: ["utf-16"] }, offsetEncoding: ["utf-16"],
+        window: { workDoneProgress: true },
+        textDocument: {
+          hover: { contentFormat: ["markdown", "plaintext"] },
+          publishDiagnostics: { versionSupport: true, relatedInformation: true },
+          documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+          rename: { prepareSupport: true },
+          callHierarchy: {}, typeHierarchy: {},
+        },
+      },
     });
+    this.capabilities = result?.capabilities ?? {};
     if ((result?.capabilities?.positionEncoding ?? result?.offsetEncoding ?? "utf-16") !== "utf-16") {
       this.fail(new Error("clangd selected an unsupported position encoding (expected UTF-16)"));
       throw new Error("clangd selected an unsupported position encoding");
@@ -98,25 +136,48 @@ export class ClangdConnection {
         this.buffer = this.buffer.subarray(headerEnd + 4 + length);
         if (message.method) {
           if (message.id !== undefined) {
-            if (message.method === "workspace/configuration") this.send({ id: message.id, result: (message.params?.items ?? []).map(() => null) });
+            if (message.method === "window/workDoneProgress/create") this.send({ id: message.id, result: null });
+            else if (message.method === "workspace/configuration") this.send({ id: message.id, result: (message.params?.items ?? []).map(() => null) });
             else if (message.method === "workspace/workspaceFolders") this.send({ id: message.id, result: [{ uri: pathToFileURL(this.cwd).href, name: this.cwd }] });
-            else this.send({ id: message.id, error: { code: -32601, message: `Unsupported client method: ${message.method}` } });
-          }
+            else this.send({ id: message.id, error: { code: METHOD_NOT_FOUND, message: `Unsupported client method: ${message.method}` } });
+          } else if (message.method === "$/progress") this.progress(message.params);
+          else if (message.method === "textDocument/publishDiagnostics") this.publishDiagnostics(message.params);
           continue;
         }
         const pending = typeof message.id === "number" ? this.pending.get(message.id) : undefined;
         if (pending) {
           this.pending.delete(message.id as number);
           pending.cleanup();
-          if (message.error) pending.reject(new Error(`clangd: ${message.error.message} (${message.error.code})`));
+          if (message.error) pending.reject(message.error.code === METHOD_NOT_FOUND ? Object.assign(new Error("method not found"), { methodNotFound: true }) : new Error(`clangd: ${message.error.message} (${message.error.code})`));
           else pending.resolve(message.result);
         }
       }
     } catch (error) { this.fail(new Error(`Invalid clangd protocol: ${(error as Error).message}`)); }
   }
 
-  private request(method: string, params: unknown, signal?: AbortSignal): Promise<any> {
+  private progress(params: any) {
+    if (params?.token !== INDEX_TOKEN) return;
+    const kind = params.value?.kind;
+    if (kind === "begin" || kind === "report") this.index = "indexing";
+    else if (kind === "end") {
+      this.index = "idle";
+      for (const wake of this.indexWaiters) wake();
+    }
+  }
+
+  private publishDiagnostics(params: any) {
+    if (typeof params?.uri !== "string") return;
+    const entry = { version: typeof params.version === "number" ? params.version : undefined, diagnostics: Array.isArray(params.diagnostics) ? params.diagnostics : [] };
+    this.diagnostics.set(params.uri, entry);
+    for (const waiter of this.diagnosticsWaiters) {
+      if (waiter.uri === params.uri && entry.version !== undefined && entry.version >= waiter.version) waiter.resolve({ status: "ready", version: entry.version, diagnostics: entry.diagnostics });
+    }
+  }
+
+  /** Sends one request. A method-not-found reply is remembered and later calls fail without a request. */
+  private call(method: string, params: unknown, signal?: AbortSignal): Promise<any> {
     checkSignal(signal);
+    if (this.unsupported.has(method)) return Promise.reject(new ClangdUnsupportedError(method));
     if (this.dead) return Promise.reject(new Error("clangd connection is closed"));
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
@@ -131,6 +192,10 @@ export class ClangdConnection {
       this.pending.set(id, { resolve, reject, cleanup });
       signal?.addEventListener("abort", cancel, { once: true });
       try { this.send({ id, method, params }); } catch (error) { this.fail(error as Error); }
+    }).catch((error: Error & { methodNotFound?: boolean }) => {
+      if (!error.methodNotFound) throw error;
+      this.unsupported.add(method);
+      throw new ClangdUnsupportedError(method);
     });
   }
 
@@ -140,51 +205,126 @@ export class ClangdConnection {
     for (const pending of this.pending.values()) { pending.cleanup(); pending.reject(error); }
     this.pending.clear();
     this.documents.clear();
+    this.diagnostics.clear();
     this.child.kill("SIGKILL");
   }
 
-  async query(method: "hover" | "definition", file: string, line: number, column: number, signal?: AbortSignal): Promise<any> {
+  /** Runs one operation at a time, after initialization, so document versions stay ordered. */
+  private serialize<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {
     checkSignal(signal);
-    const operation = this.queue.then(async () => {
+    const run = this.queue.then(async () => {
       checkSignal(signal);
       await waitFor(this.ready, signal);
       checkSignal(signal);
-      const text = await readFile(file, "utf8");
-      checkSignal(signal);
-      const lines = text.split(/\r\n|\n|\r/);
-      if (!Number.isInteger(line) || !Number.isInteger(column) || line < 1 || column < 1 || line > lines.length || column > lines[line - 1]!.length + 1) {
-        throw new Error("Position is outside the file. line and column must be positive, 1-based UTF-16 positions.");
-      }
-      const uri = pathToFileURL(file).href;
-      // Open headers also act as editor buffers in clangd: refresh them before
-      // querying another translation unit so saved-file changes cannot go stale.
-      for (const [openUri, document] of this.documents) {
-        if (openUri === uri) continue;
-        let current: string;
-        try { current = await readFile(fileURLToPath(openUri), "utf8"); }
-        catch {
-          this.send({ method: "textDocument/didClose", params: { textDocument: { uri: openUri } } });
-          this.documents.delete(openUri);
-          continue;
-        }
-        checkSignal(signal);
-        if (current !== document.text) {
-          const version = document.version + 1;
-          this.send({ method: "textDocument/didChange", params: { textDocument: { uri: openUri, version }, contentChanges: [{ text: current }] } });
-          this.documents.set(openUri, { text: current, version });
-        }
-      }
-      const previous = this.documents.get(uri);
-      const version = (previous?.version ?? 0) + 1;
-      // clangd can retain dependent preambles after full didChange updates.
-      // Reopen the queried translation unit to rebuild from saved dependencies.
-      if (previous) this.send({ method: "textDocument/didClose", params: { textDocument: { uri } } });
-      this.send({ method: "textDocument/didOpen", params: { textDocument: { uri, languageId: extname(file) === ".c" ? "c" : "cpp", version, text } } });
-      this.documents.set(uri, { text, version });
-      return this.request(`textDocument/${method}`, { textDocument: { uri }, position: { line: line - 1, character: column - 1 } }, signal);
+      return operation();
     });
-    this.queue = operation.catch(() => {});
-    return waitFor(operation, signal);
+    this.queue = run.catch(() => {});
+    return waitFor(run, signal);
+  }
+
+  /**
+   * Refreshes every open document from disk and, when `file` is given,
+   * reopens it from disk. `check` can reject the saved text before anything
+   * is sent. Must run inside `serialize`.
+   */
+  private async refresh(file: string | undefined, signal?: AbortSignal, check?: (text: string) => void) {
+    const text = file === undefined ? undefined : await readFile(file, "utf8");
+    checkSignal(signal);
+    if (text !== undefined) check?.(text);
+    const uri = file === undefined ? undefined : pathToFileURL(file).href;
+    // Open headers also act as editor buffers in clangd: refresh them before
+    // querying another translation unit so saved-file changes cannot go stale.
+    for (const [openUri, document] of this.documents) {
+      if (openUri === uri) continue;
+      let current: string;
+      try { current = await readFile(fileURLToPath(openUri), "utf8"); }
+      catch {
+        this.send({ method: "textDocument/didClose", params: { textDocument: { uri: openUri } } });
+        this.documents.delete(openUri);
+        continue;
+      }
+      checkSignal(signal);
+      if (current !== document.text) {
+        const version = document.version + 1;
+        this.send({ method: "textDocument/didChange", params: { textDocument: { uri: openUri, version }, contentChanges: [{ text: current }] } });
+        this.documents.set(openUri, { text: current, version });
+      }
+    }
+    if (file === undefined || uri === undefined || text === undefined) return undefined;
+    const previous = this.documents.get(uri);
+    const version = (previous?.version ?? 0) + 1;
+    // clangd can retain dependent preambles after full didChange updates.
+    // Reopen the queried translation unit to rebuild from saved dependencies.
+    if (previous) this.send({ method: "textDocument/didClose", params: { textDocument: { uri } } });
+    this.send({ method: "textDocument/didOpen", params: { textDocument: { uri, languageId: extname(file) === ".c" ? "c" : "cpp", version, text } } });
+    this.documents.set(uri, { text, version });
+    return { uri, version };
+  }
+
+  /** Server capabilities from the `initialize` result. */
+  async serverCapabilities(): Promise<any> {
+    await this.ready;
+    return this.capabilities;
+  }
+
+  /** Background index state; "not-started" until clangd reports progress, and it counts as incomplete. */
+  get indexState(): IndexState { return this.index; }
+
+  /** Waits up to `timeoutMs` for the background index to be idle and returns the state reached. */
+  waitForIndexIdle(timeoutMs: number, signal?: AbortSignal): Promise<IndexState> {
+    if (this.index === "idle") return Promise.resolve(this.index);
+    return waitFor(new Promise<IndexState>(done => {
+      const finish = () => { clearTimeout(timer); this.indexWaiters.delete(finish); done(this.index); };
+      const timer = setTimeout(finish, timeoutMs);
+      this.indexWaiters.add(finish);
+    }), signal);
+  }
+
+  /** Opens `file` from disk (and refreshes other open documents); returns the version clangd now has. */
+  syncFile(file: string, signal?: AbortSignal): Promise<{ uri: string; version: number }> {
+    return this.serialize(signal, async () => (await this.refresh(file, signal))!);
+  }
+
+  /**
+   * Waits up to `timeoutMs` for diagnostics of `file` at `version` or newer.
+   * Older versions are ignored; a timeout returns `{ status: "pending" }`.
+   */
+  waitForDiagnostics(file: string, version: number, timeoutMs: number, signal?: AbortSignal): Promise<DiagnosticsResult> {
+    const uri = pathToFileURL(file).href;
+    const stored = this.diagnostics.get(uri);
+    if (stored?.version !== undefined && stored.version >= version) return Promise.resolve({ status: "ready", version: stored.version, diagnostics: stored.diagnostics });
+    return waitFor(new Promise<DiagnosticsResult>(done => {
+      const waiter: DiagnosticsWaiter = { uri, version, resolve: result => { clearTimeout(timer); this.diagnosticsWaiters.delete(waiter); done(result); } };
+      const timer = setTimeout(() => waiter.resolve({ status: "pending" }), timeoutMs);
+      this.diagnosticsWaiters.add(waiter);
+    }), signal);
+  }
+
+  /**
+   * Sends an LSP request and returns its result. Open documents are refreshed
+   * from disk first, and `file`, when given, is reopened from disk. Rejects
+   * with `ClangdUnsupportedError` when clangd lacks the method.
+   */
+  request(method: string, params: unknown, options: { file?: string; signal?: AbortSignal } = {}): Promise<any> {
+    const { file, signal } = options;
+    checkSignal(signal);
+    if (this.unsupported.has(method)) return Promise.reject(new ClangdUnsupportedError(method));
+    return this.serialize(signal, async () => {
+      await this.refresh(file, signal);
+      return this.call(method, params, signal);
+    });
+  }
+
+  async query(method: "hover" | "definition", file: string, line: number, column: number, signal?: AbortSignal): Promise<any> {
+    return this.serialize(signal, async () => {
+      const synced = await this.refresh(file, signal, text => {
+        const lines = text.split(/\r\n|\n|\r/);
+        if (!Number.isInteger(line) || !Number.isInteger(column) || line < 1 || column < 1 || line > lines.length || column > lines[line - 1]!.length + 1) {
+          throw new Error("Position is outside the file. line and column must be positive, 1-based UTF-16 positions.");
+        }
+      });
+      return this.call(`textDocument/${method}`, { textDocument: { uri: synced!.uri }, position: { line: line - 1, character: column - 1 } }, signal);
+    });
   }
 
   async close() {
@@ -193,7 +333,7 @@ export class ClangdConnection {
     const timer = setTimeout(() => this.fail(new Error("clangd shutdown timed out")), 1000);
     try {
       await this.ready;
-      await this.request("shutdown", null);
+      await this.call("shutdown", null);
       this.send({ method: "exit" });
     } catch { /* failed or crashed servers are already stopped */ }
     finally {
