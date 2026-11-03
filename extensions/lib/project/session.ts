@@ -1,9 +1,11 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
-  describeFinding, describeResolved, configureErrorExcerpt, displayPath, renderBriefing, type ProjectStatus,
+  BRIEFING_BUDGET, describeFinding, describeResolved, configureErrorExcerpt, displayPath, renderBriefing, type ProjectStatus,
 } from "./briefing.ts";
-import { ConfigureManager, isSupportedCmake, probeCmake, type ConfigureResult, type Exec } from "./configure.ts";
+import {
+  ConfigureManager, isSupportedCmake, probeCmake, resolvePreset, type CmakeVersion, type ConfigureResult, type Exec,
+} from "./configure.ts";
 import { FindingsLedger, findingKey, scanDrift, type DriftFinding, type DriftReport, type ReferencedSource, type UnregisteredFinding } from "./drift.ts";
 import { effectiveStandard, formatStandard, isInSkippedDir, loadProjectModel, ownersOf, type ProjectModel } from "./model.ts";
 import { findSourceRoot, projectCacheDir } from "./root.ts";
@@ -50,6 +52,17 @@ export interface FileOwner {
   standard?: string;
   /** "C++14", or "compiler default". */
   standardText: string;
+}
+
+export interface PresetChoice {
+  /** Configure presets visible on this host, in CMake's order. */
+  available: string[];
+  /** The preset the last configure used, or the one the next configure will use before any finished. */
+  active?: string;
+  /** The preset picked when nothing valid is remembered. */
+  defaultPreset?: string;
+  /** Why presets are ignored or unusable, e.g. CMake older than 3.19. */
+  notes: string[];
 }
 
 export interface RunMessage {
@@ -102,6 +115,7 @@ export class ProjectService {
   private readonly listeners = new Set<(change: ModelChange) => void>();
   private readonly initialized: Promise<void>;
   private manager?: ConfigureManager;
+  private cmake?: CmakeVersion;
   private nonCmake: boolean;
   private nonCmakeReason?: string;
 
@@ -151,6 +165,7 @@ export class ProjectService {
       notify?.(`pi-cpp-lsp: ${root} is a CMake project, but ${this.nonCmakeReason}. Project briefing and drift detection are off for this session; install CMake 3.14 or newer to enable them.`, "warning");
       return;
     }
+    this.cmake = cmake;
     this.manager = new ConfigureManager({ root, exec: this.exec, signal: this.controller.signal });
     void this.reconfigure();
   }
@@ -208,6 +223,25 @@ export class ProjectService {
     if (targets.length === 0) return undefined;
     const standard = effectiveStandard(model, path);
     return standard === undefined ? { targets, standardText: formatStandard(undefined) } : { targets, standard, standardText: formatStandard(standard) };
+  }
+
+  /** Force a reconfigure (or join the queued one) and resolve once its model is read; a no-op without project support. */
+  async reconfigureNow(): Promise<void> {
+    await this.initialized;
+    await this.reconfigure();
+  }
+
+  /** The configure presets this project offers and the active one; undefined without project support. */
+  async presets(): Promise<PresetChoice | undefined> {
+    await this.initialized;
+    if (!this.root || !this.cmake || this.controller.signal.aborted) return undefined;
+    const resolution = await resolvePreset(this.root, this.exec, this.cmake, this.controller.signal);
+    return {
+      available: resolution.available,
+      active: this.result ? this.result.preset : resolution.preset,
+      defaultPreset: resolution.defaultPreset,
+      notes: resolution.notes,
+    };
   }
 
   /** Abort a running configure and stop reporting (KTD20). */
@@ -489,11 +523,11 @@ export class ProjectService {
     return { customType: BRIEFING_MESSAGE, content: this.briefing(), display: true };
   }
 
-  /** The full briefing for the current state. */
-  briefing(): string {
+  /** The full briefing for the current state; past `budget` characters it takes the summary form. */
+  briefing(budget = BRIEFING_BUDGET): string {
     return renderBriefing({
       root: this.root!, status: this.status, model: this.currentModel, result: this.result, modelError: this.modelError,
       findings: this.ledger.open, referenced: this.referenced, skipped: this.skipped,
-    });
+    }, budget);
   }
 }
