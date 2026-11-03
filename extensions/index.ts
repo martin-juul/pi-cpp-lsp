@@ -14,6 +14,8 @@ import { dirname, join, resolve } from "node:path";
 import { findCompilationDatabase, resolveCompileInvocation } from "./lib/compdb.ts";
 import { ProjectService, type ProjectServiceOptions } from "./lib/project/session.ts";
 import { registerProjectTools } from "./lib/project/tools.ts";
+import { registerNavigationTools } from "./lib/navigation.ts";
+import { postEditNote, resolveToolPath, type PostEditOptions } from "./lib/diagnostics.ts";
 
 const FIXED_GUIDELINES = [
   "Prefer smart pointers over raw new/delete in C++ code.",
@@ -27,15 +29,8 @@ const STANDARD_GUIDELINE =
 export interface ExtensionOptions {
   /** Overrides for the per-session project service, such as a shorter report-point wait. */
   project?: Pick<ProjectServiceOptions, "waitMs">;
-}
-
-const CPP_EXTENSIONS = new Set([
-  ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hxx", ".hh",
-]);
-
-function isCppFile(filePath: string): boolean {
-  const ext = filePath.substring(filePath.lastIndexOf(".")).toLowerCase();
-  return CPP_EXTENSIONS.has(ext);
+  /** Overrides for the post-edit diagnostics wait bounds. */
+  diagnostics?: Pick<PostEditOptions, "waitMs" | "firstOpenWaitMs">;
 }
 
 function truncateOutput(output: string): string {
@@ -84,6 +79,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
 
   // Registered after session_start so the managed clangd attaches to the new project at once (KTD11).
   const clangd = registerClangdTools(pi, { getProject: () => project });
+  registerNavigationTools(pi, clangd);
 
   pi.on("session_shutdown", async () => {
     project?.dispose();
@@ -110,29 +106,22 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
     return message ? { message } : undefined;
   });
 
-  // ── Auto-format and project report points on write/edit/bash ─────
-  pi.on("tool_result", async (event, _ctx) => {
+  // ── Post-edit pipeline on write/edit, project report point on bash ─
+  pi.on("tool_result", async (event, ctx) => {
     const notes: string[] = [];
     if (
       (event.toolName === "write" || event.toolName === "edit") &&
       !event.isError
     ) {
       const input = event.input as { path?: string };
-      if (input.path && isCppFile(input.path)) {
-        try {
-          const result = await pi.exec("clang-format", ["-i", input.path], {
-            timeout: 10000,
-          });
-          if (result.code === 0) {
-            notes.push(`\n[cpp-lsp] Formatted with clang-format ✓`);
-          }
-        } catch {
-          // clang-format not installed — silently skip
-        }
-      }
-      // Drift and staleness for every written file, CMakeLists.txt included (KTD13 step 2).
-      const drift = await project?.reportPoint();
-      if (drift) notes.push(`\n${drift}`);
+      // Format, drift, owner and clangd diagnostics in one note (KTD13).
+      const note = input.path
+        ? await postEditNote(resolveToolPath(ctx.cwd, input.path), {
+          exec: (command, args, execOptions) => pi.exec(command, args, execOptions),
+          cwd: ctx.cwd, project, clangd, ...options.diagnostics,
+        })
+        : await project?.reportPoint();
+      if (note) notes.push(`\n${note}`);
     } else if (event.toolName === "bash") {
       const drift = await project?.reportPoint();
       if (drift) notes.push(`\n${drift}`);
