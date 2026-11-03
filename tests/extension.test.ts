@@ -3,7 +3,7 @@ import test from "node:test";
 import extension from "../extensions/index.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-test("extension registers the complete tool set and shutdown lifecycle", () => {
+test("extension registers the complete tool set, the project session lifecycle and report points", () => {
   const tools: string[] = [];
   const events: string[] = [];
   const commands: string[] = [];
@@ -16,7 +16,8 @@ test("extension registers the complete tool set and shutdown lifecycle", () => {
     "cpp_build", "cpp_check", "cpp_compile", "cpp_definition", "cpp_format",
     "cpp_gen_compdb", "cpp_hover", "cpp_test",
   ]);
-  assert.ok(events.includes("session_shutdown"));
-  assert.ok(events.includes("tool_result"));
+  for (const event of ["session_start", "session_shutdown", "session_compact", "before_agent_start", "tool_result"]) {
+    assert.ok(events.includes(event), event);
+  }
   assert.ok(commands.includes("cpp-setup"));
 });

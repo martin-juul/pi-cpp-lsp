@@ -12,6 +12,21 @@ import { existsSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { findCompilationDatabase, resolveCompileInvocation } from "./lib/compdb.ts";
+import { ProjectService, type ProjectServiceOptions } from "./lib/project/session.ts";
+
+const FIXED_GUIDELINES = [
+  "Prefer smart pointers over raw new/delete in C++ code.",
+  "Ensure compile_commands.json exists for proper clangd support.",
+  "Use minimal diffs when editing C/C++ files.",
+];
+// In CMake sessions the model drives the standard guidance (R9, KTD5).
+const STANDARD_GUIDELINE =
+  "Write C/C++ code that is valid for the C++ standard of the target that owns the file you edit; the project briefing lists each target's standard.";
+
+export interface ExtensionOptions {
+  /** Overrides for the per-session project service, such as a shorter report-point wait. */
+  project?: Pick<ProjectServiceOptions, "waitMs">;
+}
 
 const CPP_EXTENSIONS = new Set([
   ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hxx", ".hh",
@@ -40,7 +55,7 @@ function truncateOutput(output: string): string {
   return result;
 }
 
-export default function (pi: ExtensionAPI) {
+export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
   registerBuildTools(pi);
   registerClangdTools(pi);
   // pi.exec never throws: a missing binary resolves with a non-zero exit code,
@@ -50,18 +65,48 @@ export default function (pi: ExtensionAPI) {
     return r.code === 0;
   }
 
-  // ── Context injection ────────────────────────────────────────────
-  pi.on("before_agent_start", async (event, _ctx) => {
-    event.systemPromptOptions.promptGuidelines = [
-      ...(event.systemPromptOptions.promptGuidelines ?? []),
-      "Prefer smart pointers over raw new/delete in C++ code.",
-      "Ensure compile_commands.json exists for proper clangd support.",
-      "Use minimal diffs when editing C/C++ files.",
-    ];
+  // ── CMake project session ──────────────────────────────────────
+  let project: ProjectService | undefined;
+
+  pi.on("session_start", async (_event, ctx) => {
+    project?.dispose();
+    // Root discovery and configure run in the background (KTD20).
+    project = new ProjectService({
+      cwd: ctx.cwd,
+      exec: (command, args, execOptions) => pi.exec(command, args, execOptions),
+      notify: (message, level) => ctx.ui.notify(message, level),
+      waitMs: options.project?.waitMs,
+    });
   });
 
-  // ── Auto-format on write/edit ────────────────────────────────────
+  pi.on("session_shutdown", async () => {
+    project?.dispose();
+    project = undefined;
+  });
+
+  pi.on("session_compact", async () => {
+    project?.resendBriefing();
+  });
+
+  // ── Context injection ────────────────────────────────────────────
+  pi.on("before_agent_start", async (event, _ctx) => {
+    const service = project;
+    await service?.ready();
+    const cmake = service?.isCmake === true;
+    event.systemPromptOptions.promptGuidelines = [
+      ...(event.systemPromptOptions.promptGuidelines ?? []),
+      ...(cmake ? [STANDARD_GUIDELINE] : FIXED_GUIDELINES),
+    ];
+    if (!service || !cmake) return;
+    // Runs the extension itself started carry no new project information.
+    if (event.messageType === "custom" && event.message.customType.startsWith("cpp-")) return;
+    const message = await service.runMessage();
+    return message ? { message } : undefined;
+  });
+
+  // ── Auto-format and project report points on write/edit/bash ─────
   pi.on("tool_result", async (event, _ctx) => {
+    const notes: string[] = [];
     if (
       (event.toolName === "write" || event.toolName === "edit") &&
       !event.isError
@@ -73,20 +118,26 @@ export default function (pi: ExtensionAPI) {
             timeout: 10000,
           });
           if (result.code === 0) {
-            return {
-              content: [
-                ...event.content,
-                {
-                  type: "text" as const,
-                  text: `\n[cpp-lsp] Formatted with clang-format ✓`,
-                },
-              ],
-            };
+            notes.push(`\n[cpp-lsp] Formatted with clang-format ✓`);
           }
         } catch {
           // clang-format not installed — silently skip
         }
       }
+      // Drift and staleness for every written file, CMakeLists.txt included (KTD13 step 2).
+      const drift = await project?.reportPoint();
+      if (drift) notes.push(`\n${drift}`);
+    } else if (event.toolName === "bash") {
+      const drift = await project?.reportPoint();
+      if (drift) notes.push(`\n${drift}`);
+    }
+    if (notes.length > 0) {
+      return {
+        content: [
+          ...event.content,
+          ...notes.map(text => ({ type: "text" as const, text })),
+        ],
+      };
     }
   });
 
