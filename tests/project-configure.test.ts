@@ -195,7 +195,8 @@ test("a deleted source listed in CMakeLists.txt fails configure with a missing f
 
   assert.equal(result.status, "failed");
   assert.deepEqual(result.missingSources, [{ path: join(root, "gone.cpp"), file: join(root, "CMakeLists.txt"), line: 3 }]);
-  assert.equal(result.reply.newestIsError, true);
+  // CMake 4 writes an error reply for a failed configure; CMake 3.x writes no reply at all.
+  assert.ok(result.reply.newest === undefined || result.reply.newestIsError, JSON.stringify(result.reply));
   assert.equal(result.reply.lastGood, undefined);
   assert.match(result.output, /Cannot find source file/);
 });
@@ -220,8 +221,9 @@ test("a failing reconfigure after a success keeps the last good reply index and 
   rmSync(join(root, "main.cpp"));
   const bad = await manager.trigger();
   assert.equal(bad.status, "failed");
-  assert.equal(bad.reply.newestIsError, true);
-  assert.equal(bad.reply.newestFromThisRun, true);
+  // CMake 4 writes an error reply from this run; CMake 3.x leaves the good reply as the newest.
+  if (bad.reply.newestIsError) assert.equal(bad.reply.newestFromThisRun, true);
+  else assert.deepEqual([bad.reply.newest, bad.reply.newestFromThisRun], [good.reply.newest, false]);
   assert.equal(bad.reply.lastGood, good.reply.newest);
   assert.ok(existsSync(bad.reply.lastGood!));
   assert.deepEqual(bad.missingSources, [{ path: join(root, "main.cpp"), file: join(root, "CMakeLists.txt"), line: 3 }]);

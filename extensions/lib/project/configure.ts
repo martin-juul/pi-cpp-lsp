@@ -192,7 +192,7 @@ export function parseMissingSources(output: string, root: string): MissingSource
 }
 
 export interface ReplyState {
-  /** Newest reply index: `index-*.json` from a successful configure or `error-*.json` from a failed one. */
+  /** Newest reply index: `index-*.json` from a successful configure or `error-*.json` from a failed one. CMake 3.x writes no reply for a failed configure, so callers decide failure from the configure status, never from this field alone. */
   newest?: string;
   newestIsError: boolean;
   /** Whether `newest` was written at or after the run's start. */
