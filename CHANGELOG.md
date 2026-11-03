@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-03
+
 ### Added
 
 - CMake project model: in a CMake project, the extension configures a managed build directory in the background and reads the CMake File API (CMake 3.14 or newer). Configuring runs the project's CMake code, so it only happens when pi trusts the project; an untrusted project gets a one-time notification and no project support.
@@ -50,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/cpp-setup` toolchain check command and `cpp-setup` skill.
 - C++ guidelines injected into the system prompt.
 
-[Unreleased]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/martin-juul/pi-cpp-lsp/releases/tag/v1.0.0
