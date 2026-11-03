@@ -222,10 +222,6 @@ pi -e ./            # load the local checkout into pi
 
 Tests run on Node.js 24. Integration tests use local C/C++ tools when installed; tests requiring unavailable tools, or a clangd feature the local clangd lacks, are skipped. CI installs Ninja and clangd 21 from apt.llvm.org, so no navigation test is skipped there.
 
-## Credits
-
-Based on the [cpp-lsp Claude Code plugin](https://github.com/zircote/cpp-lsp) by Robert Allen ([@zircote](https://github.com/zircote)), ported to a pi extension. The original MIT license notice is kept in [NOTICE](NOTICE).
-
 ## License
 
 Copyright 2026 Martin Juul Christiansen. Licensed under the [Apache License 2.0](LICENSE).
