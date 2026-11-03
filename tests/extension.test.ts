@@ -14,10 +14,11 @@ test("extension registers the complete tool set, the project session lifecycle a
   } as unknown as ExtensionAPI);
   assert.deepEqual(tools.sort(), [
     "cpp_build", "cpp_check", "cpp_compile", "cpp_definition", "cpp_format",
-    "cpp_gen_compdb", "cpp_hover", "cpp_run", "cpp_test",
+    "cpp_gen_compdb", "cpp_hover", "cpp_project", "cpp_run", "cpp_test",
   ]);
   for (const event of ["session_start", "session_shutdown", "session_compact", "before_agent_start", "tool_result"]) {
     assert.ok(events.includes(event), event);
   }
   assert.ok(commands.includes("cpp-setup"));
+  assert.ok(commands.includes("cpp-preset"));
 });

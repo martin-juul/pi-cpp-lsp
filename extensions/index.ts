@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { findCompilationDatabase, resolveCompileInvocation } from "./lib/compdb.ts";
 import { ProjectService, type ProjectServiceOptions } from "./lib/project/session.ts";
+import { registerProjectTools } from "./lib/project/tools.ts";
 
 const FIXED_GUIDELINES = [
   "Prefer smart pointers over raw new/delete in C++ code.",
@@ -60,6 +61,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
   const projectModel = () => project?.model;
   registerBuildTools(pi, projectModel);
   registerClangdTools(pi);
+  registerProjectTools(pi, () => project);
   // pi.exec never throws: a missing binary resolves with a non-zero exit code,
   // so check availability explicitly before running a tool.
   async function hasCommand(name: string): Promise<boolean> {
