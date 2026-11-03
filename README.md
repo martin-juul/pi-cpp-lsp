@@ -57,7 +57,7 @@ Or use the `cpp-setup` skill (`/skill:cpp-setup`) for a guided walkthrough.
 | `cpp_build` | Build a configured CMake project |
 | `cpp_test` | Run a configured project's CTest tests |
 | `cpp_run` | Run a built executable target with arguments |
-| `cpp_project` | Query the CMake project model: overview, targets, one target, a file's owner, or refresh |
+| `cpp_project` | Query the CMake project model: overview, targets, one target, a file's owner, presets, or refresh |
 | `cpp_references` | Find all references to a symbol across the project |
 | `cpp_symbols` | Search symbols across the project, or outline one file |
 | `cpp_calls` | List the callers (incoming) or callees (outgoing) of a function |
@@ -67,6 +67,8 @@ Or use the `cpp-setup` skill (`/skill:cpp-setup`) for a guided walkthrough.
 ### Project Model
 
 When the session's working directory is inside a CMake project, the extension finds the source root. That is the topmost directory with a `CMakeLists.txt` in an unbroken chain of parent directories, stopping at the git top level. The extension configures the project in the background, in a build directory it manages (see [Managed Cache](#managed-cache)). It never configures into your own `build/` directory and never edits `CMakeLists.txt`.
+
+Configuring runs the project's CMake code, so it only happens in projects pi trusts (pi's project trust, described in pi's security documentation). In a project pi does not trust, the extension does not run CMake, the managed clangd, or its git and CTest drift checks. The session behaves like a non-CMake one, and a one-time notification says why. To enable project support, trust the project with `/trust` and restart pi, or start pi with `--approve`. pi treats a folder without project-local pi resources (such as `.pi/settings.json` or `.pi/extensions`) as trusted.
 
 - **Session briefing.** The first prompt of a session carries a project briefing: the preset, configuration and generator, a table of targets with their kind, directories, C++ standard and dependencies, open drift findings, and notes. Large projects get a shorter summary, and `cpp_project overview` returns the full briefing. The briefing is sent again after a context compaction or a preset change.
 - **Drift notes.** After each `write`, `edit` and `bash` tool call, the extension checks the project again. If CMake files changed, it reconfigures first. A drift note lists new findings and findings that no longer hold. A source file (`.c`, `.cc`, `.cpp`, `.cxx`) in no target is reported with its likely owning target and the `CMakeLists.txt` line to edit. A source listed in CMake but missing on disk is reported with the line that lists it. The extension never edits build files; pi registers the change.
@@ -82,10 +84,11 @@ When the session's working directory is inside a CMake project, the extension fi
 - `target` (with `name`) returns one target's sources, include directories, defines, standard, dependencies and artifacts.
 - `owner` (with `path`) returns the targets that build a file and the standard it must stay valid for.
 - `refresh` reconfigures now and returns the result.
+- `presets` lists the configure presets, marking the active and the default one. It only lists them; switching is the user's `/cpp-preset <name>` command.
 
 While a configure is running, `cpp_project` says so. After a failed configure, it answers from the last successful model and says the answer may be stale.
 
-Outside a CMake project, or with CMake older than 3.14, the extension behaves as before: no briefing, no drift notes, and `cpp_hover` and `cpp_definition` use whatever compilation database exists. For a CMake project whose CMake is too old, a one-time notification says why.
+Outside a CMake project, in a project pi does not trust, or with CMake older than 3.14, the extension behaves as before: no briefing, no drift notes, and `cpp_hover` and `cpp_definition` use whatever compilation database exists. For an untrusted CMake project or one whose CMake is too old, a one-time notification says why, and `cpp_project` reports the reason.
 
 #### Default Build Directory (Behavior Change)
 

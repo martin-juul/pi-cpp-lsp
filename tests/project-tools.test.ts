@@ -209,6 +209,25 @@ test("/cpp-preset lists presets, switches to release and the next service uses i
   assert.match(next.briefing(), /Preset: release/);
 });
 
+test("cpp_project presets lists the presets, the active and default one, and leaves switching to /cpp-preset", { skip: !hasCmake }, async t => {
+  freshCache();
+  const root = copyFixture("presets");
+  const h = harness(t, root);
+  await settled(h.project);
+  const result = await h.call({ action: "presets" });
+  assert.equal(result.isError, false);
+  assert.match(result.text, /^\s+release$/m);
+  assert.match(result.text, /^\s+debug \(active, default\)$/m);
+  assert.doesNotMatch(result.text, /\bbase\b/);
+  assert.match(result.text, /\/cpp-preset <name>/);
+  assert.deepEqual(readProjectState(root), {});
+  assert.equal(h.project.lastConfigure?.preset, "debug");
+
+  const plain = harness(t, copyFixture("basic"));
+  await settled(plain.project);
+  assert.match((await plain.call({ action: "presets" })).text, /no usable configure presets/);
+});
+
 test("/cpp-preset with an unknown name reports the available presets and changes nothing", { skip: !hasCmake }, async t => {
   freshCache();
   const root = copyFixture("presets");
@@ -256,7 +275,7 @@ test("cpp_project and /cpp-preset report a non-CMake directory", async t => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-cpp-tools-plain-")));
   for (const project of [new ProjectService({ cwd: root, exec: nodeExec }), null]) {
     const h = harness(t, root, { project });
-    for (const action of ["overview", "targets", "refresh"]) {
+    for (const action of ["overview", "targets", "refresh", "presets"]) {
       const result = await h.call({ action });
       assert.equal(result.isError, true);
       assert.match(result.text, /not a CMake project/);

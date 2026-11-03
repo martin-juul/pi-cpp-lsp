@@ -88,7 +88,7 @@ function git(root: string, ...args: string[]): void {
 interface RunMessage { customType: string; content: string; display: boolean }
 
 /** Drive the real extension entry point through a fake ExtensionAPI. */
-async function session(t: any, cwd: string, options: { exec?: Exec; waitMs?: number; start?: boolean } = {}) {
+async function session(t: any, cwd: string, options: { exec?: Exec; waitMs?: number; start?: boolean; trusted?: boolean } = {}) {
   const handlers = new Map<string, ((event: any, ctx: any) => unknown)[]>();
   const tools = new Map<string, any>();
   const notifications: string[] = [];
@@ -99,7 +99,7 @@ async function session(t: any, cwd: string, options: { exec?: Exec; waitMs?: num
     on(name: string, handler: any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
   };
   extension(api as unknown as ExtensionAPI, { project: { waitMs: options.waitMs ?? 20_000 } });
-  const ctx = { cwd, ui: { notify: (message: string) => notifications.push(message) } };
+  const ctx = { cwd, isProjectTrusted: () => options.trusted ?? true, ui: { notify: (message: string) => notifications.push(message) } };
   const emit = async (name: string, event: any) => {
     let last: unknown;
     for (const handler of handlers.get(name) ?? []) {
@@ -236,6 +236,33 @@ test("a CMake project without a usable cmake is a non-CMake session with a one-t
     assert.equal(s.notifications.length, 1, s.notifications.join("\n"));
     assert.match(s.notifications[0], reason);
   }
+});
+
+test("an untrusted CMake project runs no project commands and is a non-CMake session with a one-time trust note", async t => {
+  freshCache();
+  const root = copyFixture("basic");
+  const commands: string[] = [];
+  const exec: Exec = (command, args, options) => {
+    commands.push([command, ...args].join(" "));
+    return nodeExec(command, args, options);
+  };
+  const s = await session(t, root, { exec, trusted: false });
+  const first = await s.run();
+  const second = await s.run();
+  assert.equal(first.message, undefined);
+  assert.equal(second.message, undefined);
+  assert.deepEqual(first.guidelines, ["Existing guideline.", ...FIXED_GUIDELINES]);
+  assert.equal(await s.toolResult("bash", { command: "true" }), undefined);
+  assert.equal(await s.toolResult("write", { path: join(root, "notes.txt") }), undefined);
+  assert.deepEqual(commands.filter(command => /^(cmake|ctest|git|clangd)\b/.test(command)), []);
+  assert.equal(s.notifications.length, 1, s.notifications.join("\n"));
+  assert.match(s.notifications[0], /does not trust/);
+  assert.match(s.notifications[0], /\/trust/);
+  assert.match(s.notifications[0], /--approve/);
+  const overview = await s.tools.get("cpp_project").execute("call", { action: "overview" }, undefined, undefined, { cwd: root });
+  assert.equal(overview.isError, true);
+  assert.match(overview.content[0].text, /does not trust/);
+  assert.match(overview.content[0].text, /\/trust.*--approve/);
 });
 
 test("a bash git mv appends the drift deltas to the bash result", { skip: !hasCmake || !hasGit }, async t => {

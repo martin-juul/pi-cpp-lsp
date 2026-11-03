@@ -103,6 +103,8 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
       exec,
       notify: (message, level) => ctx.ui.notify(message, level),
       waitMs: options.project?.waitMs,
+      // Configuring runs the repository's CMake code: only in projects pi trusts.
+      trusted: ctx.isProjectTrusted(),
     });
   });
 

@@ -5,9 +5,9 @@ import { boundedOutput } from "../output.ts";
 import { configureErrorExcerpt, displayPath, ownedDirectories } from "./briefing.ts";
 import { findTarget, formatStandard, type ProjectModel, type ProjectTarget } from "./model.ts";
 import { writeRememberedPreset } from "./root.ts";
-import type { ProjectService } from "./session.ts";
+import type { PresetChoice, ProjectService } from "./session.ts";
 
-const ACTIONS = ["overview", "targets", "target", "owner", "refresh"] as const;
+const ACTIONS = ["overview", "targets", "target", "owner", "refresh", "presets"] as const;
 type Action = typeof ACTIONS[number];
 
 interface Parameters {
@@ -31,7 +31,10 @@ const projectTargets = (model: ProjectModel) => model.targets.filter(target => t
 /** Why the session has no project model to query, or undefined when it has project support. */
 function unsupported(project: ProjectService | undefined, cwd: string): string | undefined {
   if (!project?.root) return `${cwd} is not a CMake project: no CMakeLists.txt was found in it or its parent directories.`;
-  if (!project.isCmake) return `${project.root} is a CMake project, but ${project.disabledReason ?? "CMake is unavailable"}, so the project model is unavailable.`;
+  if (!project.isCmake) {
+    const hint = project.disabledHint ? ` ${project.disabledHint}` : "";
+    return `${project.root} is a CMake project, but ${project.disabledReason ?? "CMake is unavailable"}, so the project model is unavailable.${hint}`;
+  }
   return undefined;
 }
 
@@ -98,6 +101,16 @@ function ownerText(project: ProjectService, model: ProjectModel, path: string): 
   ].join("\n");
 }
 
+/** The preset listing shared by `/cpp-preset` and `cpp_project presets`, headed by `heading`; `switchLine` follows the presets. */
+function presetListing(root: string, choice: PresetChoice, heading: string, switchLine: string): string[] {
+  if (choice.available.length === 0) return [`${root} has no usable configure presets.`, ...choice.notes];
+  const lines = choice.available.map(preset => {
+    const marks = [...(preset === choice.active ? ["active"] : []), ...(preset === choice.defaultPreset ? ["default"] : [])];
+    return `  ${preset}${marks.length > 0 ? ` (${marks.join(", ")})` : ""}`;
+  });
+  return [`${heading} ${root}:`, ...lines, switchLine, ...choice.notes];
+}
+
 /** Settles with the promise, or with false once the signal aborts. */
 async function untilAborted(promise: Promise<unknown>, signal: AbortSignal | undefined): Promise<boolean> {
   if (!signal) return promise.then(() => true);
@@ -112,7 +125,7 @@ async function untilAborted(promise: Promise<unknown>, signal: AbortSignal | und
 }
 
 /**
- * Register `cpp_project` (KTD15: overview, targets, target, owner, refresh) and `/cpp-preset`
+ * Register `cpp_project` (KTD15: overview, targets, target, owner, refresh, plus a read-only presets listing) and `/cpp-preset`
  * (R3, R8). `getProject` returns the session's ProjectService, or undefined before or outside one.
  */
 export function registerProjectTools(pi: ExtensionAPI, getProject: () => ProjectService | undefined): void {
@@ -121,8 +134,15 @@ export function registerProjectTools(pi: ExtensionAPI, getProject: () => Project
     await project?.ready();
     const reason = unsupported(project, cwd);
     if (reason || !project) return { text: reason!, isError: true, status: "non-cmake" };
-    if (project.status === "configuring") return { text: loading(project), isError: false, status: "configuring" };
     const root = project.root!;
+    // Listing presets needs no model, so it answers while configuring too.
+    if (params.action === "presets") {
+      const choice = await project.presets();
+      if (!choice) return { text: `The configure presets for ${root} are unavailable.`, isError: true, status: project.status };
+      const lines = presetListing(root, choice, "Configure presets for", "Only the user can switch presets, with the /cpp-preset <name> command; cpp_project only lists them.");
+      return { text: lines.join("\n"), isError: false, status: project.status };
+    }
+    if (project.status === "configuring") return { text: loading(project), isError: false, status: "configuring" };
 
     if (params.action === "overview") return { text: project.briefing(Infinity), isError: false, status: project.status };
 
@@ -164,10 +184,11 @@ export function registerProjectTools(pi: ExtensionAPI, getProject: () => Project
     description:
       "Query the CMake project model the extension configures. Actions: overview (the full project briefing: targets, standards, drift, notes), " +
       "targets (list targets), target (one target's sources, include directories, defines, standard and dependencies; needs name), " +
-      "owner (the targets that build a file and the C++ standard it must stay valid for; needs path), refresh (reconfigure now and return the result).",
-    promptSnippet: "Query the CMake project: targets, a target's sources/flags/standard, a file's owning targets, or force a reconfigure",
+      "owner (the targets that build a file and the C++ standard it must stay valid for; needs path), refresh (reconfigure now and return the result), " +
+      "presets (list the configure presets, the active one and the default; read-only, the user switches presets with /cpp-preset).",
+    promptSnippet: "Query the CMake project: targets, a target's sources/flags/standard, a file's owning targets, configure presets, or force a reconfigure",
     parameters: Type.Object({
-      action: Type.Enum([...ACTIONS], { description: "overview | targets | target | owner | refresh" }),
+      action: Type.Enum([...ACTIONS], { description: "overview | targets | target | owner | refresh | presets" }),
       name: Type.Optional(Type.String({ minLength: 1, description: "Target name, for action target" })),
       path: Type.Optional(Type.String({ minLength: 1, description: "File path, absolute or relative to the working directory, for action owner" })),
     }),
@@ -193,16 +214,8 @@ export function registerProjectTools(pi: ExtensionAPI, getProject: () => Project
       if (!choice) return;
       const root = project.root!;
       const name = args.trim();
-      if (choice.available.length === 0) {
-        ctx.ui.notify([`${NOTE_PREFIX} ${root} has no usable configure presets.`, ...choice.notes].join("\n"), name ? "warning" : "info");
-        return;
-      }
-      if (!name) {
-        const lines = choice.available.map(preset => {
-          const marks = [...(preset === choice.active ? ["active"] : []), ...(preset === choice.defaultPreset ? ["default"] : [])];
-          return `  ${preset}${marks.length > 0 ? ` (${marks.join(", ")})` : ""}`;
-        });
-        ctx.ui.notify([`${NOTE_PREFIX} configure presets for ${root}:`, ...lines, "Switch with /cpp-preset <name>.", ...choice.notes].join("\n"), "info");
+      if (choice.available.length === 0 || !name) {
+        ctx.ui.notify(`${NOTE_PREFIX} ${presetListing(root, choice, "configure presets for", "Switch with /cpp-preset <name>.").join("\n")}`, name ? "warning" : "info");
         return;
       }
       if (!choice.available.includes(name)) {

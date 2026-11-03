@@ -265,7 +265,7 @@ int main(int argc, char** argv) {
     registerCommand() {},
     on(name: string, handler: (event: unknown, ctx: unknown) => unknown) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
   } as unknown as ExtensionAPI);
-  const ctx = { cwd: root, ui: { notify() {} } };
+  const ctx = { cwd: root, isProjectTrusted: () => true, ui: { notify() {} } };
   const emit = async (name: string, event: Record<string, unknown>) => {
     for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx);
   };

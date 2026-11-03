@@ -150,7 +150,7 @@ async function session(t: any, cwd: string) {
   };
   // Generous bounds keep a loaded machine from turning a real answer into "pending".
   extension(api as unknown as ExtensionAPI, { project: { waitMs: 60_000 }, diagnostics: { waitMs: 20_000, firstOpenWaitMs: 40_000 } });
-  const ctx = { cwd, ui: { notify() {} } };
+  const ctx = { cwd, isProjectTrusted: () => true, ui: { notify() {} } };
   const emit = async (name: string, event: any) => {
     let last: unknown;
     for (const handler of handlers.get(name) ?? []) {

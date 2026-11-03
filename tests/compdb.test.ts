@@ -167,7 +167,7 @@ test("without build_dir, cpp_compile and cpp_check use the managed compile_comma
     exec, registerCommand() {}, registerTool(tool: any) { registered.set(tool.name, tool); },
     on(name: string, handler: any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
   } as any);
-  const ctx = { cwd: root, ui: { notify() {} } };
+  const ctx = { cwd: root, isProjectTrusted: () => true, ui: { notify() {} } };
   const emit = async (name: string, event: object) => { for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx); };
   t.after(async () => {
     await emit("session_shutdown", { reason: "quit" });

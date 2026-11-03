@@ -23,6 +23,10 @@ export const UPDATE_MESSAGE = "cpp-project-update";
 
 const NOTE_PREFIX = "[cpp-lsp]";
 
+/** Why an untrusted CMake project gets no project support, and how to change that (pi's project trust). */
+const UNTRUSTED_REASON = "pi does not trust this project, and configuring it would run the project's CMake code";
+const TRUST_STEPS = "trust the project with /trust and restart pi, or start pi with --approve";
+
 export interface ProjectServiceOptions {
   /** The session's working directory. */
   cwd: string;
@@ -32,6 +36,12 @@ export interface ProjectServiceOptions {
   notify?: (message: string, level: "info" | "warning" | "error") => void;
   /** Report-point wait bound; defaults to REPORT_WAIT_MS. */
   waitMs?: number;
+  /**
+   * Whether pi trusts the project (pass ctx.isProjectTrusted() at session start). Configuring runs
+   * the project's CMake code, so an untrusted CMake project gets no project support and runs no
+   * cmake, git or ctest. Defaults to true.
+   */
+  trusted?: boolean;
 }
 
 export interface ModelChange {
@@ -109,6 +119,7 @@ export class ProjectService {
   private cmake?: CmakeVersion;
   private nonCmake: boolean;
   private nonCmakeReason?: string;
+  private nonCmakeHint?: string;
 
   private currentModel?: ProjectModel;
   private result?: ConfigureResult;
@@ -142,7 +153,13 @@ export class ProjectService {
     this.waitMs = options.waitMs ?? REPORT_WAIT_MS;
     this.root = findSourceRoot(options.cwd);
     this.nonCmake = this.root === undefined;
-    this.initialized = this.root === undefined ? Promise.resolve() : this.initialize(this.root, options.notify);
+    if (this.root !== undefined && options.trusted === false) {
+      this.nonCmake = true;
+      this.nonCmakeReason = UNTRUSTED_REASON;
+      this.nonCmakeHint = `To enable it, ${TRUST_STEPS}.`;
+      options.notify?.(`pi-cpp-lsp: ${this.root} is a CMake project, but ${UNTRUSTED_REASON}. Project briefing and drift detection are off for this session; to enable them, ${TRUST_STEPS}.`, "warning");
+    }
+    this.initialized = this.root === undefined || this.nonCmake ? Promise.resolve() : this.initialize(this.root, options.notify);
   }
 
   private async initialize(root: string, notify: ProjectServiceOptions["notify"]): Promise<void> {
@@ -178,6 +195,11 @@ export class ProjectService {
   /** Why a directory with a CMakeLists.txt still gets no project support. */
   get disabledReason(): string | undefined {
     return this.nonCmakeReason;
+  }
+
+  /** What the user can do to get project support, when the reason has a remedy beyond installing tools. */
+  get disabledHint(): string | undefined {
+    return this.nonCmakeHint;
   }
 
   /** The current model, or the last good one while configure is failing or running (KTD22). */
