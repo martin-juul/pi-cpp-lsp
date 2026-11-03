@@ -58,7 +58,7 @@ function editsByFile(edit: any): Map<string, TextEdit[]> {
   };
   if (Array.isArray(edit?.documentChanges)) {
     for (const change of edit.documentChanges) {
-      if (typeof change?.kind === "string") throw new Refusal(`clangd's edit would ${change.kind} a file, which a rename does not apply`);
+      if (typeof change?.kind === "string") throw new Refusal(`clangd's edit would ${change.kind} a file, and cpp_rename applies only text edits`);
       add(change?.textDocument?.uri, change?.edits);
     }
   } else if (edit?.changes && typeof edit.changes === "object") {

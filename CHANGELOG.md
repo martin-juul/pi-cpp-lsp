@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CMake project model: in a CMake project, the extension configures a managed build directory in the background and reads the CMake File API (CMake 3.14 or newer). Configuring runs the project's CMake code, so it only happens when pi trusts the project; an untrusted project gets a one-time notification and no project support.
 - Session briefing on the first prompt, with the preset, configuration, generator, targets, C++ standards, dependencies, open drift findings and notes. It is sent again after compaction and after a preset change.
-- Drift notes after `write`, `edit` and `bash`: source files in no target, with the likely owner and the `CMakeLists.txt` line to edit, and listed sources missing on disk. Files referenced in CMake but not built in this configuration are listed as information, never as drift.
+- Drift notes after `write`, `edit` and `bash`. They name source files that belong to no target, with the likely owner and the `CMakeLists.txt` line to edit, and listed sources that are missing on disk. Files referenced in CMake but not built in this configuration are listed as information, never as drift.
 - Post-edit note after `write` and `edit`: clang-format result, drift, the owning targets and their C++ standard, and clangd diagnostics (errors first, at most 20, "pending" when clangd does not answer in time).
 - `cpp_project` tool with `overview`, `targets`, `target`, `owner`, `refresh` and `presets` actions. `presets` only lists the configure presets; switching stays with `/cpp-preset`.
 - `cpp_run` tool to run a built executable target with arguments.

@@ -32,7 +32,7 @@ Use when starting C/C++ work in a new environment, when clangd can't find header
 
 2. **Check the clangd version**
 
-   Navigation features depend on the clangd version (`clangd --version`, or run `/cpp-setup`, which lists the supported features):
+   Navigation features depend on the clangd version. Check it with `clangd --version`, or run `/cpp-setup`, which lists the supported features.
 
    | Feature | clangd |
    |---------|--------|
@@ -83,7 +83,7 @@ Use when starting C/C++ work in a new environment, when clangd can't find header
 
 5. **Generate compile_commands.json** (only outside CMake projects, or for your own build directory)
 
-   In a CMake project the extension configures its own managed build directory under `${XDG_CACHE_HOME:-~/.cache}/pi-cpp-lsp/` and needs no `compile_commands.json` in the project. To use your own build directory instead, generate it and pass `build_dir` to the tools:
+   In a CMake project the extension configures its own managed build directory under `${XDG_CACHE_HOME:-~/.cache}/pi-cpp-lsp/` and needs no `compile_commands.json` in the project. To use your own build directory instead, generate `compile_commands.json` in it and pass `build_dir` to the tools:
    ```bash
    cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -B build
    ln -s build/compile_commands.json .
@@ -118,7 +118,7 @@ Use when starting C/C++ work in a new environment, when clangd can't find header
 - In CMake projects, tools called without `build_dir` use the managed build directory once the project model is ready, not `build/`. Each result names the directory it used.
 - If `cpp_calls` with `direction: outgoing` or `cpp_types` reports "not supported by this clangd version", install a newer clangd (step 2).
 - Navigation results right after the session starts may be incomplete while clangd's background index builds; the result says so.
-- The `cpp_compile` tool uses `-fsyntax-only` which is faster but skips linking — linker errors won't be caught.
+- The `cpp_compile` tool uses `-fsyntax-only`, which is faster but skips linking, so it does not catch linker errors.
 - Use `cpp_build` after configuration to catch linker errors, then `cpp_test` to run CTest tests.
 - `cpp_hover` and `cpp_definition` use saved files and 1-based line/column positions (UTF-16 columns).
 
@@ -127,7 +127,7 @@ Use when starting C/C++ work in a new environment, when clangd can't find header
 - `clangd --version` exits 0
 - Outside CMake projects, `compile_commands.json` exists in project root
 - `cpp_check` and `cpp_compile` tools work on a sample `.cpp` file
-- `/cpp-setup` shows the clangd features and CMake thresholds you need as supported
+- `/cpp-setup` marks every clangd feature and CMake threshold you need as supported
 - `cpp_hover` and `cpp_definition` resolve a known project symbol
 - In a CMake project, `cpp_project` with `action: overview` returns the project briefing, and `cpp_references` finds a known symbol's uses
 - For CMake projects with tests, `cpp_build` and `cpp_test` succeed

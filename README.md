@@ -70,8 +70,8 @@ When the session's working directory is inside a CMake project, the extension fi
 
 Configuring runs the project's CMake code, so it only happens in projects pi trusts (pi's project trust, described in pi's security documentation). In a project pi does not trust, the extension does not run CMake, the managed clangd, or its git and CTest drift checks. The session behaves like a non-CMake one, and a one-time notification says why. To enable project support, trust the project with `/trust` and restart pi, or start pi with `--approve`. pi treats a folder without project-local pi resources (such as `.pi/settings.json` or `.pi/extensions`) as trusted.
 
-- **Session briefing.** The first prompt of a session carries a project briefing: the preset, configuration and generator, a table of targets with their kind, directories, C++ standard and dependencies, open drift findings, and notes. Large projects get a shorter summary, and `cpp_project overview` returns the full briefing. The briefing is sent again after a context compaction or a preset change.
-- **Drift notes.** After each `write`, `edit` and `bash` tool call, the extension checks the project again. If CMake files changed, it reconfigures first. A drift note lists new findings and findings that no longer hold. A source file (`.c`, `.cc`, `.cpp`, `.cxx`) in no target is reported with its likely owning target and the `CMakeLists.txt` line to edit. A source listed in CMake but missing on disk is reported with the line that lists it. The extension never edits build files; pi registers the change.
+- **Session briefing.** The first prompt of a session carries a project briefing: the preset, configuration and generator; a table of targets with their kind, directories, C++ standard and dependencies; open drift findings; and notes. Large projects get a shorter summary, and `cpp_project overview` returns the full briefing. The briefing is sent again after a context compaction or a preset change.
+- **Drift notes.** After each `write`, `edit` and `bash` tool call, the extension checks the project again. If CMake files changed, it reconfigures first. A drift note lists new findings and findings that no longer hold. A source file (`.c`, `.cc`, `.cpp`, `.cxx`) in no target is reported with its likely owning target and the `CMakeLists.txt` line to edit. A source listed in CMake but missing on disk is reported with the line that lists it. The extension never edits build files; pi makes the edit.
 - **Not built in this configuration.** Source files that are named in a `CMakeLists.txt` but not built in the active configuration, for example behind an `option()` or a platform check, are listed as information in the briefing. They are never reported as drift.
 - **Post-edit note.** After a `write` or `edit` of a C/C++ file, one note reports the clang-format result, drift, the owning targets and the C++ standard the file must stay valid for, and clangd's diagnostics for the file. Errors come first, at most 20 diagnostics are listed, and the note reads "diagnostics pending" when clangd does not answer in time.
 - **Presets.** With a `CMakePresets.json` or `CMakeUserPresets.json`, the extension uses the first configure preset whose name mentions `debug` or `dev`, or else the first one. `/cpp-preset` lists the presets and `/cpp-preset <name>` switches to one and reconfigures. The choice is remembered per project. Without a preset, the managed build uses `CMAKE_BUILD_TYPE=Debug`.
@@ -88,7 +88,7 @@ Configuring runs the project's CMake code, so it only happens in projects pi tru
 
 While a configure is running, `cpp_project` says so. After a failed configure, it answers from the last successful model and says the answer may be stale.
 
-Outside a CMake project, in a project pi does not trust, or with CMake older than 3.14, the extension behaves as before: no briefing, no drift notes, and `cpp_hover` and `cpp_definition` use whatever compilation database exists. For an untrusted CMake project or one whose CMake is too old, a one-time notification says why, and `cpp_project` reports the reason.
+Outside a CMake project, in a project pi does not trust, or with CMake older than 3.14, the extension runs without the project model: no briefing, no drift notes, and `cpp_hover` and `cpp_definition` use whatever compilation database exists. For an untrusted CMake project or one whose CMake is too old, a one-time notification says why, and `cpp_project` reports the reason.
 
 #### Default Build Directory (Behavior Change)
 
@@ -106,7 +106,7 @@ Database checks currently support direct GCC/Clang commands. Compiler wrappers, 
 
 `cpp_hover` and `cpp_definition` accept `file`, `line`, and `column`, plus an optional `build_dir` for clangd's compilation database. Positions are **1-based**, with columns counted in UTF-16 code units. Results reflect files saved on disk. Clangd starts on demand and stops when the session shuts down.
 
-For example, use `cpp_hover` with `{"file":"src/main.cpp","line":12,"column":5}` to inspect the symbol at that position. Accurate project flags are needed to resolve project headers and types.
+For example, use `cpp_hover` with `{"file":"src/main.cpp","line":12,"column":5}` to inspect the symbol at that position. clangd needs accurate project flags to resolve project headers and types.
 
 ### Navigation
 
@@ -116,7 +116,7 @@ In a CMake project, the extension runs one clangd per session against the manage
 - `cpp_symbols` takes `query` to search the whole project by name, or `file` to outline one file with members nested under their class.
 - `cpp_calls` takes a position and `direction`: `incoming` (callers) or `outgoing` (callees).
 - `cpp_types` takes a position and `direction`: `supertypes` (base classes) or `subtypes` (derived classes).
-- `cpp_rename` takes a position and `new_name`, and edits every file that uses the symbol. The rename waits for the index, and the whole rename is refused, with nothing changed, when clangd cannot rename the symbol, the index is still building, a file changed during the rename, or an edit would land outside the project or in a build or dependency directory. The result lists each changed file with its clangd diagnostics.
+- `cpp_rename` takes a position and `new_name`, and edits every file that uses the symbol. The rename waits for the index. The whole rename is refused, with nothing changed, when clangd cannot rename the symbol, the index is still building, a file changed during the rename, or an edit would land outside the project or in a build or dependency directory. The result lists each changed file with its clangd diagnostics.
 
 These tools need the project model and always use the managed, indexed clangd. They return an error outside a CMake project or while the first configure is running. Positions are 1-based UTF-16, as for `cpp_hover`. Results are capped at 100 entries (300 for a file outline). On first use in a large project the index may still be building; results then end with a note that they may be incomplete. A feature your clangd does not support returns "not supported by this clangd version" with the version it needs.
 
@@ -164,7 +164,7 @@ Nothing is written into the project tree. The cache is safe to delete at any tim
 
 ## Required Tools
 
-All tools are optional; each feature reports clearly when its tool is missing.
+All tools are optional; each feature reports when its tool is missing.
 
 | Tool | macOS | Debian/Ubuntu | Purpose |
 |------|-------|---------------|---------|

@@ -533,7 +533,7 @@ export function registerClangdTools(pi: ExtensionAPI, toolOptions: ClangdToolOpt
         file: Type.String({ description: "Source path, absolute or relative to the project cwd" }),
         line: Type.Integer({ minimum: 1, description: "1-based line" }),
         column: Type.Integer({ minimum: 1, description: "1-based UTF-16 column (JavaScript string offsets + 1)" }),
-        build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json, relative to project cwd; otherwise the managed CMake build directory once the project model is ready, else clangd searches source ancestors" })),
+        build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json, relative to the project cwd (default: the managed CMake build directory once the project model is ready, else clangd's own search upward from the source file)" })),
       }),
       async execute(_id, params, signal, _onUpdate, ctx) {
         const file = resolve(ctx.cwd, params.file);
