@@ -1,4 +1,11 @@
 // Minimal protocol peer: deliberately fragments frames and interleaves requests.
+// `--help` lists the flags clangd 23 knows; with `old-help` it omits the newer index flags.
+if (process.argv.includes('--help')) {
+  const flags = ['--compile-commands-dir=<string>', '--background-index', '--log=<value>'];
+  if (!process.argv.includes('old-help')) flags.push('--background-index-priority=<value>', '--rename-file-limit=<int>');
+  process.stdout.write(`OPTIONS:\n${flags.map(flag => `  ${flag}  - mock`).join('\n')}\n`);
+  process.exit(0);
+}
 let buffer = Buffer.alloc(0);
 const documents = new Map();
 const cancellations = [];
@@ -58,11 +65,12 @@ process.stdin.on('data', chunk => {
       if (doc.text.includes('HANG')) continue;
       if (doc.text.includes('ERROR')) send({ id: message.id, error: { code: -32001, message: 'mock failure' } });
       else if (doc.text.includes('EMPTY')) send({ id: message.id, result: null });
-      else if (message.method.endsWith('hover')) send({ id: message.id, result: { contents: { kind: 'markdown', value: JSON.stringify({ text: doc.text, version: doc.version, position: message.params.position, buildDir, cancellations }) } } });
+      else if (message.method.endsWith('hover')) send({ id: message.id, result: { contents: { kind: 'markdown', value: JSON.stringify({ text: doc.text, version: doc.version, position: message.params.position, buildDir, cancellations, argv: process.argv.slice(2) }) } } });
       else send({ id: message.id, result: [{ targetUri: doc.uri, targetRange: { start: { line: 0, character: 0 }, end: { line: 2, character: 4 } }, targetSelectionRange: { start: { line: 1, character: 2 }, end: { line: 1, character: 5 } } }] });
     } else if (message.method === 'shutdown') send({ id: message.id, result: null });
     else if (message.method === 'exit') process.exit(0);
     else if (message.method === 'mock/requests') send({ id: message.id, result: requests });
+    else if (message.method === 'mock/documents') send({ id: message.id, result: [...documents.keys()] });
     else if (message.method === 'mock/argv') send({ id: message.id, result: process.argv.slice(2) });
     else if (message.id !== undefined) send({ id: message.id, error: { code: -32601, message: `method not found: ${message.method}` } });
   }

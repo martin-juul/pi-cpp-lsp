@@ -60,7 +60,6 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
   // Tools without an explicit build_dir default to the session's ready CMake model (KTD16).
   const projectModel = () => project?.model;
   registerBuildTools(pi, projectModel);
-  registerClangdTools(pi);
   registerProjectTools(pi, () => project);
   // pi.exec never throws: a missing binary resolves with a non-zero exit code,
   // so check availability explicitly before running a tool.
@@ -82,6 +81,9 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
       waitMs: options.project?.waitMs,
     });
   });
+
+  // Registered after session_start so the managed clangd attaches to the new project at once (KTD11).
+  const clangd = registerClangdTools(pi, { getProject: () => project });
 
   pi.on("session_shutdown", async () => {
     project?.dispose();

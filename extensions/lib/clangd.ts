@@ -1,9 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, extname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import type { ProjectModel } from "./project/model.ts";
+import type { ProjectService } from "./project/session.ts";
 
 const MAX_MESSAGE = 16 * 1024 * 1024;
 const MAX_OUTPUT = 24_000;
@@ -343,6 +346,122 @@ export class ClangdConnection {
   }
 }
 
+/** Index flags of the managed connection (KTD11); the rename limit is lifted so widely used symbols can be renamed. */
+const MANAGED_FLAGS = ["--background-index", "--background-index-priority=low", "--rename-file-limit=0"];
+const helpTexts = new Map<string, Promise<string | undefined>>();
+
+/** `clangd --help` output, once per command line; undefined when it cannot be read. */
+function clangdHelp(command: string, args: string[]): Promise<string | undefined> {
+  const key = JSON.stringify([command, args]);
+  let help = helpTexts.get(key);
+  if (!help) {
+    help = new Promise(done => execFile(command, [...args, "--help"], { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+      done(error && !stdout ? undefined : `${stdout}\n${stderr}`);
+    }));
+    helpTexts.set(key, help);
+  }
+  return help;
+}
+
+/** The managed index flags this clangd lists in `--help`; older versions reject unknown flags at startup. */
+async function managedFlags(options: ClangdOptions): Promise<string[]> {
+  const help = await clangdHelp(options.command ?? "clangd", options.args ?? []);
+  if (help === undefined) return MANAGED_FLAGS;
+  return MANAGED_FLAGS.filter(flag => new RegExp(`(^|\\s)${flag.split("=")[0]}(=|\\s|$)`, "m").test(help));
+}
+
+/** The parts of the project service the managed connection uses. */
+export type ManagedProject = Pick<ProjectService, "model" | "onModelChange">;
+
+/** A compiled, existing project source, opened so clangd starts indexing (clangd indexes nothing until a file is opened). */
+function firstProjectSource(model: ProjectModel): string | undefined {
+  for (const target of model.targets) {
+    if (!target.isProjectTarget) continue;
+    for (const source of target.sources) {
+      if (!source.isGenerated && source.language !== undefined && existsSync(source.path)) return source.path;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * One clangd connection per session against the managed compile database, with a background index
+ * kept beside that database, outside the project tree (KTD11). It starts as soon as the project
+ * model is ready, restarts when `compile_commands.json` changes, and restarts on the next use after
+ * a crash or timeout.
+ */
+export class ManagedClangd {
+  private project?: ManagedProject;
+  private unsubscribe?: () => void;
+  private current?: ClangdConnection;
+  private starting?: Promise<void>;
+  private generation = 0;
+  private readonly options: ClangdOptions;
+
+  constructor(options: ClangdOptions = {}) {
+    this.options = options;
+  }
+
+  /** Follows `project`; a different project closes the old connection. Call it whenever the session's project may have changed. */
+  attach(project: ManagedProject | undefined): void {
+    if (project === this.project) return;
+    this.detach();
+    this.project = project;
+    if (!project) return;
+    this.unsubscribe = project.onModelChange(change => {
+      if (change.compileDatabaseChanged || !this.current?.alive) this.start(change.model);
+    });
+    if (project.model) this.start(project.model);
+  }
+
+  /**
+   * The managed connection, or undefined while no model is ready. A dead connection is restarted;
+   * one that fails while starting is returned anyway, so its error reaches the caller.
+   */
+  async connection(): Promise<ClangdConnection | undefined> {
+    const model = this.project?.model;
+    if (!model) return undefined;
+    if (!this.starting && !this.current?.alive) this.start(model);
+    await this.starting;
+    return this.current;
+  }
+
+  private start(model: ProjectModel): void {
+    const generation = ++this.generation;
+    const previous = this.current;
+    this.current = undefined;
+    void previous?.close();
+    const starting = (async () => {
+      const flags = await managedFlags(this.options);
+      if (generation !== this.generation) return;
+      const connection = new ClangdConnection(model.sourceRoot, model.buildDir, { ...this.options, extraArgs: [...(this.options.extraArgs ?? []), ...flags] });
+      this.current = connection;
+      const source = firstProjectSource(model);
+      // A failed open surfaces on the next request; the connection is restarted then.
+      if (source) await connection.syncFile(source).catch(() => {});
+    })();
+    this.starting = starting;
+    void starting.finally(() => { if (this.starting === starting) this.starting = undefined; });
+  }
+
+  private detach(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
+    this.project = undefined;
+    this.generation++;
+    const previous = this.current;
+    this.current = undefined;
+    void previous?.close();
+  }
+
+  /** Stops following the project and shuts the connection down. */
+  async close(): Promise<void> {
+    const previous = this.current;
+    this.detach();
+    await previous?.close();
+  }
+}
+
 function hoverText(value: any): string {
   if (!value) return "";
   if (typeof value === "string") return value;
@@ -363,11 +482,27 @@ function location(value: any) {
   };
 }
 
-export function registerClangdTools(pi: ExtensionAPI, options: ClangdOptions = {}) {
+export interface ClangdToolOptions extends ClangdOptions {
+  /** The session's project service; with a ready model, calls without `build_dir` use the managed connection (KTD16). */
+  getProject?: () => ManagedProject | undefined;
+}
+
+/**
+ * Registers cpp_hover and cpp_definition and returns the session's managed connection for other
+ * tools. Register after the handler that creates the project service, so `session_start` sees it;
+ * otherwise the managed connection attaches at the next agent start or tool call.
+ */
+export function registerClangdTools(pi: ExtensionAPI, toolOptions: ClangdToolOptions = {}): ManagedClangd {
+  const { getProject, ...options } = toolOptions;
   const connections = new Map<string, ClangdConnection>();
+  const managed = new ManagedClangd(options);
+  const follow = () => { if (getProject) managed.attach(getProject()); };
+  pi.on("session_start", async () => { follow(); });
+  pi.on("agent_start", async () => { follow(); });
   pi.on("session_shutdown", async () => {
     await Promise.all([...connections.values()].map(connection => connection.close()));
     connections.clear();
+    await managed.close();
   });
   for (const method of ["hover", "definition"] as const) {
     pi.registerTool({
@@ -378,7 +513,7 @@ export function registerClangdTools(pi: ExtensionAPI, options: ClangdOptions = {
         file: Type.String({ description: "Source path, absolute or relative to the project cwd" }),
         line: Type.Integer({ minimum: 1, description: "1-based line" }),
         column: Type.Integer({ minimum: 1, description: "1-based UTF-16 column (JavaScript string offsets + 1)" }),
-        build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json, relative to project cwd; otherwise clangd searches source ancestors" })),
+        build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json, relative to project cwd; otherwise the managed CMake build directory once the project model is ready, else clangd searches source ancestors" })),
       }),
       async execute(_id, params, signal, _onUpdate, ctx) {
         const file = resolve(ctx.cwd, params.file);
@@ -392,21 +527,28 @@ export function registerClangdTools(pi: ExtensionAPI, options: ClangdOptions = {
             try { await readFile(resolve(buildDir, "compile_commands.json"), "utf8"); }
             catch { throw new Error(`No readable compile_commands.json in build_dir: ${buildDir}. Generate a compilation database first.`); }
           }
-          const key = JSON.stringify([resolve(ctx.cwd), buildDir]);
-          let connection = connections.get(key);
-          if (!connection?.alive) {
-            connection = new ClangdConnection(resolve(ctx.cwd), buildDir, options);
-            connections.set(key, connection);
+          follow();
+          let connection = buildDir === undefined ? await waitFor(managed.connection(), signal) : undefined;
+          // The result names the managed compile database it used (KTD16).
+          const used = connection ? { ...base, build_dir: connection.buildDir, managed: true } : base;
+          const note = connection ? `\n[compile database: ${connection.buildDir} (managed)]` : "";
+          if (!connection) {
+            const key = JSON.stringify([resolve(ctx.cwd), buildDir]);
+            connection = connections.get(key);
+            if (!connection?.alive) {
+              connection = new ClangdConnection(resolve(ctx.cwd), buildDir, options);
+              connections.set(key, connection);
+            }
           }
           const result = await connection.query(method, file, params.line, params.column, signal);
           if (method === "hover") {
             const text = bounded(hoverText(result?.contents));
-            return { content: [{ type: "text", text: text || "No hover information at this position." }], details: { ...base, found: !!text, hover: text } };
+            return { content: [{ type: "text", text: (text || "No hover information at this position.") + note }], details: { ...used, found: !!text, hover: text } };
           }
           const all = result ? (Array.isArray(result) ? result : [result]) : [];
           const locations = all.slice(0, 100).map(location);
           const text = locations.length ? locations.map(item => `${item.file}:${item.line}:${item.column}`).join("\n") : "No definition found at this position.";
-          return { content: [{ type: "text", text: bounded(text) }], details: { ...base, found: locations.length > 0, locations, truncated: all.length > locations.length } };
+          return { content: [{ type: "text", text: bounded(text) + note }], details: { ...used, found: locations.length > 0, locations, truncated: all.length > locations.length } };
         } catch (error) {
           const message = bounded((error as Error).message);
           return { isError: true, content: [{ type: "text", text: message }], details: { ...base, error: true, message } };
@@ -414,4 +556,5 @@ export function registerClangdTools(pi: ExtensionAPI, options: ClangdOptions = {
       },
     });
   }
+  return managed;
 }

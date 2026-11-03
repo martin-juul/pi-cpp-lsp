@@ -3,19 +3,30 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { spawn, spawnSync } from "node:child_process";
+import { cpSync, existsSync, readdirSync, realpathSync, readFileSync, writeFileSync, utimesSync } from "node:fs";
+import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { ProjectService } from "../extensions/lib/project/session.ts";
+import type { ProjectModel } from "../extensions/lib/project/model.ts";
 import { pathToFileURL } from "node:url";
-import { ClangdConnection, ClangdUnsupportedError, registerClangdTools, type ClangdOptions } from "../extensions/lib/clangd.ts";
+import { ClangdConnection, ClangdUnsupportedError, registerClangdTools, type ClangdOptions, type ClangdToolOptions } from "../extensions/lib/clangd.ts";
 
 const fixture = resolve("tests/fixtures/mock-clangd.mjs");
+/** Registers the clangd tools on a fake ExtensionAPI that keeps every event handler. */
+function register(options: ClangdToolOptions) {
+  const tools = new Map<string, any>();
+  const handlers = new Map<string, ((event: any, ctx: any) => unknown)[]>();
+  const api = { registerTool: (tool: any) => tools.set(tool.name, tool), on: (name: string, handler: any) => handlers.set(name, [...(handlers.get(name) ?? []), handler]) };
+  const managed = registerClangdTools(api as unknown as ExtensionAPI, options);
+  const emit = async (name: string, event: any = {}) => { for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, {}); };
+  return { tools, managed, emit };
+}
 async function harness(t: any, options: ClangdOptions = { command: process.execPath, args: [fixture], timeoutMs: 1000 }) {
   const cwd = await mkdtemp(join(tmpdir(), "pi-clangd-test-"));
   const file = join(cwd, "hello world.cpp");
   await writeFile(file, "int value = 42;\nint main() { return value; }\n");
-  const tools = new Map<string, any>();
-  let shutdown = async () => {};
-  registerClangdTools({ registerTool: (tool: any) => tools.set(tool.name, tool), on: (_name: string, callback: any) => { shutdown = callback; } } as unknown as ExtensionAPI, options);
+  const { tools, emit } = register(options);
+  const shutdown = () => emit("session_shutdown");
   t.after(async () => { await shutdown(); await rm(cwd, { recursive: true, force: true }); });
   return { cwd, file, shutdown, call: (method = "hover", params: any = {}, signal?: AbortSignal) => tools.get(`cpp_${method}`).execute("call", { file, line: 1, column: 5, ...params }, signal, undefined, { cwd }) };
 }
@@ -229,4 +240,142 @@ test("real clangd advertises references, rename, call and type hierarchy provide
   assert.equal(capabilities.renameProvider?.prepareProvider, true);
   assert.ok(capabilities.callHierarchyProvider);
   assert.ok(capabilities.typeHierarchyProvider);
+});
+
+
+// ---------------------------------------------------------------------------
+// Managed connection (KTD11, KTD16)
+
+/** A project service stand-in whose model is ready from the start. */
+function readyProject(cwd: string, source: string, buildDir: string) {
+  const model = { sourceRoot: cwd, buildDir, targets: [{ isProjectTarget: true, sources: [{ path: join(cwd, "missing.cpp"), isGenerated: false, language: "CXX" }, { path: source, isGenerated: false, language: "CXX" }] }] } as unknown as ProjectModel;
+  return { model, onModelChange: () => () => {} } as unknown as ProjectService;
+}
+
+async function managedMock(t: any, extra: string[] = []) {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-clangd-managed-"));
+  const source = join(cwd, "main.cpp");
+  const buildDir = join(cwd, "managed");
+  await writeFile(source, "int main() {}\n");
+  await mkdir(buildDir);
+  await writeFile(join(buildDir, "compile_commands.json"), "[]");
+  const project = readyProject(cwd, source, buildDir);
+  const registered = register({ command: process.execPath, args: [fixture, ...extra], timeoutMs: 1000, getProject: () => project });
+  t.after(async () => { await registered.emit("session_shutdown"); await rm(cwd, { recursive: true, force: true }); });
+  await registered.emit("session_start");
+  return { ...registered, cwd, source, buildDir };
+}
+
+test("the managed connection starts with the index flags and opens a project source, while an explicit build_dir keeps the index off", async t => {
+  const h = await managedMock(t);
+  const managed = await h.managed.connection();
+  assert.ok(managed, "the managed connection starts when the model is ready");
+  const argv: string[] = await managed.request("mock/argv", null);
+  assert.ok(argv.lastIndexOf("--background-index") > argv.indexOf("--background-index=false"));
+  assert.ok(argv.includes("--background-index-priority=low"));
+  assert.ok(argv.includes("--rename-file-limit=0"));
+  assert.ok(argv.includes(`--compile-commands-dir=${h.buildDir}`));
+  assert.deepEqual(await managed.request("mock/documents", null), [pathToFileURL(h.source).href]);
+
+  const implicit = await h.tools.get("cpp_hover").execute("call", { file: h.source, line: 1, column: 5 }, undefined, undefined, { cwd: h.cwd });
+  assert.equal(JSON.parse(implicit.details.hover).buildDir, `--compile-commands-dir=${h.buildDir}`);
+  assert.equal(implicit.details.build_dir, h.buildDir);
+  assert.match(implicit.content[0].text, new RegExp(`compile database: ${h.buildDir}`));
+
+  const explicit = await h.tools.get("cpp_hover").execute("call", { file: h.source, line: 1, column: 5, build_dir: "managed" }, undefined, undefined, { cwd: h.cwd });
+  const explicitArgv: string[] = JSON.parse(explicit.details.hover).argv;
+  assert.ok(explicitArgv.includes("--background-index=false"));
+  assert.ok(!explicitArgv.includes("--background-index"), "an explicit build_dir never writes an index");
+  assert.ok(!explicitArgv.includes("--rename-file-limit=0"));
+});
+
+test("index flags an older clangd does not list are left out", async t => {
+  const h = await managedMock(t, ["old-help"]);
+  const argv: string[] = await (await h.managed.connection())!.request("mock/argv", null);
+  assert.ok(argv.includes("--background-index"));
+  assert.ok(!argv.some(arg => arg.startsWith("--background-index-priority") || arg.startsWith("--rename-file-limit")), argv.join(" "));
+});
+
+const cmakeAvailable = spawnSync("cmake", ["--version"]).status === 0;
+const realProjectTools = clangdAvailable && cmakeAvailable;
+
+// A child_process executor with pi.exec's contract: no shell, kill on abort or timeout.
+function nodeExec(command: string, args: string[], options: ExecOptions = {}): Promise<ExecResult> {
+  return new Promise(done => {
+    let stdout = "", stderr = "", killed = false;
+    const child = spawn(command, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const kill = () => { killed = true; child.kill("SIGKILL"); };
+    if (options.signal?.aborted) kill(); else options.signal?.addEventListener("abort", kill, { once: true });
+    const timer = options.timeout ? setTimeout(kill, options.timeout) : undefined;
+    child.stdout.on("data", data => { stdout += data; });
+    child.stderr.on("data", data => { stderr += data; });
+    child.on("error", () => { clearTimeout(timer); done({ stdout, stderr, code: 127, killed }); });
+    child.on("close", code => { clearTimeout(timer); done({ stdout, stderr, code: code ?? 1, killed }); });
+  });
+}
+
+function listTree(dir: string): string[] {
+  return readdirSync(dir, { recursive: true, encoding: "utf8" });
+}
+
+/** A real ProjectService on a copy of the clangd fixture, with the managed cache in a temp dir. */
+async function realProject(t: any) {
+  const previousCache = process.env.XDG_CACHE_HOME;
+  const scratch = realpathSync(await mkdtemp(join(tmpdir(), "pi-clangd-project-")));
+  process.env.XDG_CACHE_HOME = join(scratch, "cache");
+  const root = join(scratch, "clangd");
+  cpSync(resolve("tests/fixtures/cmake/clangd"), root, { recursive: true });
+  const before = listTree(root).sort();
+  const project = new ProjectService({ cwd: root, exec: nodeExec });
+  const registered = register({ timeoutMs: 30_000, getProject: () => project });
+  t.after(async () => {
+    await registered.emit("session_shutdown");
+    project.dispose();
+    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = previousCache;
+    await rm(scratch, { recursive: true, force: true });
+  });
+  await registered.emit("session_start");
+  await until(() => project.status === "ready", 60_000);
+  return { ...registered, project, root, before, cache: process.env.XDG_CACHE_HOME };
+}
+
+test("real clangd indexes the managed project outside its tree, starting with no tool call", { skip: !realProjectTools }, async t => {
+  const h = await realProject(t);
+  const connection = (await h.managed.connection())!;
+  assert.ok(connection, "the managed connection starts once the model is ready");
+  await until(() => connection.indexState !== "not-started", 30_000);
+  assert.equal(await connection.waitForIndexIdle(60_000), "idle");
+
+  const symbols = await connection.request("workspace/symbol", { query: "compute_widget_total" });
+  assert.ok(symbols.some((symbol: any) => symbol.name === "compute_widget_total" && symbol.location.uri === pathToFileURL(join(h.root, "widget.cpp")).href), JSON.stringify(symbols));
+
+  const hover = await h.tools.get("cpp_hover").execute("call", { file: "main.cpp", line: 1, column: 20 }, undefined, undefined, { cwd: h.root });
+  assert.equal(hover.details.error, undefined, hover.content[0].text);
+  assert.match(hover.details.hover, /double/, "the fixture's compile definition reaches clangd");
+  assert.equal(hover.details.build_dir, h.project.buildDir);
+
+  const buildDir = h.project.buildDir!;
+  assert.ok(buildDir.startsWith(h.cache!), buildDir);
+  assert.ok(readdirSync(join(buildDir, ".cache", "clangd", "index")).some(name => name.startsWith("widget.cpp.")));
+  assert.deepEqual(listTree(h.root).sort(), h.before, "nothing is written into the project tree");
+  assert.equal(existsSync(join(h.root, ".cache")), false);
+});
+
+test("real clangd restarts after a reconfigure that adds a source, and the new source resolves", { skip: !realProjectTools }, async t => {
+  const h = await realProject(t);
+  const first = (await h.managed.connection())!;
+  await writeFile(join(h.root, "added.cpp"), "MANAGED_VALUE_TYPE added_value = 2;\n");
+  const lists = join(h.root, "CMakeLists.txt");
+  writeFileSync(lists, readFileSync(lists, "utf8").replace("widget.cpp)", "widget.cpp added.cpp)"));
+  const later = new Date(Date.now() + 2000);
+  utimesSync(lists, later, later);
+  await h.project.reportPoint();
+  await until(() => h.project.model!.targets.some(target => target.sources.some(source => source.path.endsWith("added.cpp"))), 60_000);
+
+  const second = (await h.managed.connection())!;
+  assert.notEqual(second, first, "a changed compile database restarts the connection");
+  assert.equal(first.alive, false);
+  const hover = await h.tools.get("cpp_hover").execute("call", { file: "added.cpp", line: 1, column: 20 }, undefined, undefined, { cwd: h.root });
+  assert.equal(hover.details.error, undefined, hover.content[0].text);
+  assert.match(hover.details.hover, /double/);
 });
