@@ -1,0 +1,225 @@
+import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import extension from "../extensions/index.ts";
+import { ClangdConnection, type Diagnostic } from "../extensions/lib/clangd.ts";
+import { postEditNote } from "../extensions/lib/diagnostics.ts";
+import type { Exec } from "../extensions/lib/project/configure.ts";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const fixtures = join(here, "fixtures", "cmake");
+const hasCmake = spawnSync("cmake", ["--version"]).status === 0;
+const hasClangd = spawnSync("clangd", ["--version"]).status === 0;
+const hasClangFormat = spawnSync("clang-format", ["--version"]).status === 0;
+
+// A child_process executor with pi.exec's contract: no shell, kill on abort or timeout.
+const nodeExec: Exec = (command: string, args: string[], options: ExecOptions = {}) => new Promise<ExecResult>(resolve => {
+  let stdout = "", stderr = "", killed = false;
+  const child = spawn(command, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+  const kill = () => { killed = true; child.kill("SIGKILL"); };
+  if (options.signal?.aborted) kill(); else options.signal?.addEventListener("abort", kill, { once: true });
+  const timer = options.timeout ? setTimeout(kill, options.timeout) : undefined;
+  child.stdout.on("data", data => { stdout += data; });
+  child.stderr.on("data", data => { stderr += data; });
+  child.on("error", () => { clearTimeout(timer); resolve({ stdout, stderr, code: 127, killed }); });
+  child.on("close", code => { clearTimeout(timer); resolve({ stdout, stderr, code: code ?? 1, killed }); });
+});
+
+/** pi.exec for a missing binary: it resolves with a non-zero code instead of throwing. */
+const noClangFormat: Exec = (command, args, options) => command === "clang-format"
+  ? Promise.resolve({ stdout: "", stderr: "clang-format: not found", code: 127, killed: false })
+  : nodeExec(command, args, options);
+/** A clang-format that reports success without touching the file. */
+const fakeClangFormat: Exec = (command, args, options) => command === "clang-format"
+  ? Promise.resolve({ stdout: "", stderr: "", code: 0, killed: false })
+  : nodeExec(command, args, options);
+
+/**
+ * A minimal LSP peer: it answers initialize and shutdown and, on every didOpen, publishes the
+ * diagnostics given as its first argument at the opened version. With `null` it never publishes.
+ */
+const PEER = `
+const diagnostics = JSON.parse(process.argv[1]);
+let buffer = Buffer.alloc(0);
+const send = message => { const body = JSON.stringify({ jsonrpc: "2.0", ...message }); process.stdout.write("Content-Length: " + Buffer.byteLength(body) + "\\r\\n\\r\\n" + body); };
+process.stdin.on("data", chunk => {
+  buffer = Buffer.concat([buffer, chunk]);
+  for (;;) {
+    const end = buffer.indexOf("\\r\\n\\r\\n");
+    if (end < 0) return;
+    const length = Number(/Content-Length: (\\d+)/.exec(buffer.subarray(0, end).toString())[1]);
+    if (buffer.length < end + 4 + length) return;
+    const message = JSON.parse(buffer.subarray(end + 4, end + 4 + length).toString());
+    buffer = buffer.subarray(end + 4 + length);
+    if (message.method === "initialize") send({ id: message.id, result: { capabilities: { positionEncoding: "utf-16" } } });
+    else if (message.method === "shutdown") send({ id: message.id, result: null });
+    else if (message.method === "exit") process.exit(0);
+    else if (message.method === "textDocument/didOpen" && diagnostics) {
+      const { uri, version } = message.params.textDocument;
+      send({ method: "textDocument/publishDiagnostics", params: { uri, version, diagnostics } });
+    }
+  }
+});`;
+
+async function peer(t: any, diagnostics: Diagnostic[] | null) {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "pi-cpp-diag-")));
+  const file = join(cwd, "src", "widget.cpp");
+  mkdirSync(dirname(file));
+  writeFileSync(file, "int main() { return 0; }\n");
+  const connection = new ClangdConnection(cwd, undefined, { command: process.execPath, args: ["-e", PEER, JSON.stringify(diagnostics)], timeoutMs: 5000 });
+  t.after(async () => { await connection.close(); rmSync(cwd, { recursive: true, force: true }); });
+  return { cwd, file, clangd: { connection: async () => connection } };
+}
+
+const diagnostic = (line: number, severity: number, message: string): Diagnostic =>
+  ({ range: { start: { line, character: 4 }, end: { line, character: 8 } }, severity, message });
+
+test("a clangd that never publishes reads diagnostics pending, never clean, within the bound", async t => {
+  const p = await peer(t, null);
+  const started = Date.now();
+  const note = await postEditNote(p.file, { cwd: p.cwd, exec: noClangFormat, clangd: p.clangd, waitMs: 200, firstOpenWaitMs: 400 });
+  assert.ok(Date.now() - started < 3000, "the wait is bounded");
+  assert.match(note!, /^\[cpp-lsp\] diagnostics pending/);
+  assert.doesNotMatch(note!, /no problems/);
+});
+
+test("with clang-format absent, diagnostics still appear", async t => {
+  const p = await peer(t, [diagnostic(2, 1, "use of undeclared identifier 'oops'")]);
+  const note = await postEditNote(p.file, { cwd: p.cwd, exec: noClangFormat, clangd: p.clangd, waitMs: 2000, firstOpenWaitMs: 4000 });
+  assert.equal(note, "[cpp-lsp] diagnostics: 1 error\nsrc/widget.cpp:3:5: error: use of undeclared identifier 'oops'");
+});
+
+test("a clean file reads no problems once clangd answered for the synced version", async t => {
+  const p = await peer(t, [diagnostic(0, 3, "an information note"), diagnostic(1, 4, "a hint")]);
+  const note = await postEditNote(p.file, { cwd: p.cwd, exec: noClangFormat, clangd: p.clangd, waitMs: 2000, firstOpenWaitMs: 4000 });
+  assert.equal(note, "[cpp-lsp] diagnostics: no problems");
+});
+
+test("with clangd absent, formatting, drift and owner still appear and diagnostics are skipped silently", async t => {
+  const p = await peer(t, null);
+  const project = {
+    reportPoint: async () => "[cpp-lsp] New: src/widget.cpp belongs to no target",
+    ownerOf: (path: string) => path === p.file ? { targets: ["legacy"], standard: "14", standardText: "C++14" } : undefined,
+  };
+  const expected = "[cpp-lsp] Formatted with clang-format ✓\nNew: src/widget.cpp belongs to no target\nowner legacy (C++14)";
+  const none = await postEditNote(p.file, { cwd: p.cwd, exec: fakeClangFormat, project, clangd: { connection: async () => undefined } });
+  assert.equal(none, expected);
+  const missing = new ClangdConnection(p.cwd, undefined, { command: join(p.cwd, "no-such-clangd"), timeoutMs: 2000 });
+  t.after(() => missing.close());
+  const failed = await postEditNote(p.file, { cwd: p.cwd, exec: fakeClangFormat, project, clangd: { connection: async () => missing } });
+  assert.equal(failed, expected);
+});
+
+test("more than 20 diagnostics are capped, errors listed before warnings", async t => {
+  const warnings = Array.from({ length: 15 }, (_, line) => diagnostic(line, 2, `warning ${line + 1}`));
+  const errors = Array.from({ length: 10 }, (_, index) => diagnostic(20 + index, 1, `error ${index + 1}`));
+  const p = await peer(t, [...warnings, diagnostic(40, 3, "info"), ...errors]);
+  const note = await postEditNote(p.file, { cwd: p.cwd, exec: noClangFormat, clangd: p.clangd, waitMs: 2000, firstOpenWaitMs: 4000 });
+  const lines = note!.split("\n");
+  assert.equal(lines[0], "[cpp-lsp] diagnostics: 10 errors, 15 warnings (first 20 shown)");
+  assert.equal(lines.length, 21);
+  assert.deepEqual(lines.slice(1, 11), errors.map((_, index) => `src/widget.cpp:${21 + index}:5: error: error ${index + 1}`));
+  assert.deepEqual(lines.slice(11), warnings.slice(0, 10).map((_, line) => `src/widget.cpp:${line + 1}:5: warning: warning ${line + 1}`));
+});
+
+// ---------------------------------------------------------------------------
+// The real pipeline: the extension's tool_result hook, a real ProjectService and the managed clangd
+
+function copyFixture(name: string): string {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "pi-cpp-diag-")));
+  const root = join(scratch, name);
+  cpSync(join(fixtures, name), root, { recursive: true });
+  return root;
+}
+
+async function session(t: any, cwd: string) {
+  const previousCache = process.env.XDG_CACHE_HOME;
+  const cache = mkdtempSync(join(tmpdir(), "pi-cpp-cache-"));
+  process.env.XDG_CACHE_HOME = cache;
+  const handlers = new Map<string, ((event: any, ctx: any) => unknown)[]>();
+  const api = {
+    exec: nodeExec,
+    registerTool() {},
+    registerCommand() {},
+    on(name: string, handler: any) { handlers.set(name, [...(handlers.get(name) ?? []), handler]); },
+  };
+  // Generous bounds keep a loaded machine from turning a real answer into "pending".
+  extension(api as unknown as ExtensionAPI, { project: { waitMs: 60_000 }, diagnostics: { waitMs: 20_000, firstOpenWaitMs: 40_000 } });
+  const ctx = { cwd, isProjectTrusted: () => true, ui: { notify() {} } };
+  const emit = async (name: string, event: any) => {
+    let last: unknown;
+    for (const handler of handlers.get(name) ?? []) {
+      const value = await handler({ type: name, ...event }, ctx);
+      if (value !== undefined) last = value;
+    }
+    return last as any;
+  };
+  t.after(async () => {
+    await emit("session_shutdown", { reason: "quit" });
+    if (previousCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = previousCache;
+    rmSync(cache, { recursive: true, force: true });
+    rmSync(dirname(cwd), { recursive: true, force: true });
+  });
+  await emit("session_start", { reason: "startup" });
+  await emit("before_agent_start", { systemPrompt: "", systemPromptOptions: {}, messageType: "user", prompt: "hi" });
+  return {
+    /** Writes `text` to `path` as pi's tool would, then returns the note the tool_result hook appended. */
+    async toolResult(toolName: "write" | "edit", path: string, text: string) {
+      writeFileSync(join(cwd, path), text);
+      const content = [{ type: "text", text: "Successfully wrote the file" }];
+      const result = await emit("tool_result", { toolName, toolCallId: "call", input: { path }, content, isError: false, details: undefined });
+      assert.ok(result?.content, "the hook appends a note");
+      assert.deepEqual(result.content.slice(0, 1), content, "the original content stays first and unchanged");
+      assert.equal(result.isError, undefined, "the hook never flips isError");
+      assert.equal(result.content.length, 2, "one combined note");
+      return result.content[1].text as string;
+    },
+  };
+}
+
+test("write and edit results carry clang-format, owner and real clangd diagnostics in one note", { skip: !hasCmake || !hasClangd }, async t => {
+  const root = copyFixture("multi");
+  const s = await session(t, root);
+
+  // An unformatted type error in a file of the C++14 target (AE8).
+  const legacy = "libs/legacy/legacy.cpp";
+  const broken = await s.toolResult("write", legacy, '#include "legacy.h"\nint   legacy_value( ) {return "x";}\n');
+  const onDisk = readFileSync(join(root, legacy), "utf8").split("\n")[1]!;
+  if (hasClangFormat) {
+    assert.equal(onDisk, 'int legacy_value() { return "x"; }', "the file is formatted before clangd sees it");
+    assert.match(broken, /^\n\[cpp-lsp\] Formatted with clang-format ✓\n/);
+  }
+  assert.match(broken, /\nowner legacy \(C\+\+14\)\n/);
+  assert.match(broken, /\ndiagnostics: 1 error\n/);
+  assert.match(broken, new RegExp(`\\nlibs/legacy/legacy\\.cpp:2:${onDisk.indexOf('"x"') + 1}: error: .*'int'`), "the error points into the formatted text");
+  assert.ok(broken.indexOf("owner legacy") < broken.indexOf("diagnostics:"), "owner before diagnostics");
+
+  const clean = await s.toolResult("edit", legacy, '#include "legacy.h"\nint legacy_value() { return shared_value(); }\n');
+  assert.match(clean, /\nowner legacy \(C\+\+14\)\ndiagnostics: no problems$/);
+  assert.doesNotMatch(clean, /pending/);
+
+  // A header gets its own diagnostics.
+  const header = "libs/legacy/include/legacy.h";
+  const headerNote = await s.toolResult("edit", header, "#pragma once\nint legacy_value();\nint shared_value();\ninline int broken() { return missing_name; }\n");
+  assert.match(headerNote, /\nlibs\/legacy\/include\/legacy\.h:4:\d+: error: .*missing_name/);
+});
+
+test("non-C/C++ files skip formatting and diagnostics but still reconfigure and report drift", { skip: !hasCmake || !hasClangd }, async t => {
+  const root = copyFixture("multi");
+  const s = await session(t, root);
+  const added = await s.toolResult("write", "libs/legacy/newer.cpp", "int newer_value() { return 3; }\n");
+  assert.match(added, /New: libs\/legacy\/newer\.cpp.*no target/);
+  assert.match(added, /diagnostics: no problems/);
+
+  const lists = "libs/legacy/CMakeLists.txt";
+  const text = readFileSync(join(root, lists), "utf8").replace("legacy.cpp shared.cpp", "legacy.cpp   shared.cpp newer.cpp");
+  const resolved = await s.toolResult("edit", lists, text);
+  assert.match(resolved, /Resolved: libs\/legacy\/newer\.cpp/);
+  assert.doesNotMatch(resolved, /Formatted|diagnostics|owner/);
+  assert.equal(readFileSync(join(root, lists), "utf8"), text, "CMakeLists.txt is never formatted");
+});

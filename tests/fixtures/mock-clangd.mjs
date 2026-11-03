@@ -1,14 +1,33 @@
 // Minimal protocol peer: deliberately fragments frames and interleaves requests.
+// `--help` lists the flags clangd 23 knows; with `old-help` it omits the newer index flags.
+if (process.argv.includes('--help')) {
+  const flags = ['--compile-commands-dir=<string>', '--background-index', '--log=<value>'];
+  if (!process.argv.includes('old-help')) flags.push('--background-index-priority=<value>', '--rename-file-limit=<int>');
+  process.stdout.write(`OPTIONS:\n${flags.map(flag => `  ${flag}  - mock`).join('\n')}\n`);
+  process.exit(0);
+}
+import { appendFileSync, readFileSync } from 'node:fs';
 let buffer = Buffer.alloc(0);
 const documents = new Map();
 const cancellations = [];
 let initialized = false;
 let buildDir = process.argv.find(arg => arg.startsWith('--compile-commands-dir='));
+const requests = {};
+const indexToken = 'backgroundIndexProgress';
 function send(message) {
   const body = JSON.stringify({ jsonrpc: '2.0', ...message });
   const frame = Buffer.from(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
   process.stdout.write(frame.subarray(0, 17));
   process.stdout.write(frame.subarray(17));
+}
+// Like clangd: publish versioned diagnostics after every open or change.
+// File markers drive the extra protocol paths: DIAG reports one error,
+// INDEX-BEGIN creates the background-index progress token and begins it,
+// INDEX-END ends it.
+function opened(doc) {
+  send({ method: 'textDocument/publishDiagnostics', params: { uri: doc.uri, version: doc.version, diagnostics: doc.text.includes('DIAG') ? [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } }, severity: 1, message: `mock error version ${doc.version}` }] : [] } });
+  if (doc.text.includes('INDEX-BEGIN')) send({ id: 'progress-create', method: 'window/workDoneProgress/create', params: { token: indexToken } });
+  if (doc.text.includes('INDEX-END')) send({ method: '$/progress', params: { token: indexToken, value: { kind: 'end' } } });
 }
 process.stdin.on('data', chunk => {
   buffer = Buffer.concat([buffer, chunk]);
@@ -19,7 +38,11 @@ process.stdin.on('data', chunk => {
     if (buffer.length < end + 4 + length) return;
     const message = JSON.parse(buffer.subarray(end + 4, end + 4 + length));
     buffer = buffer.subarray(end + 4 + length);
-    if (message.method === 'initialize') {
+    if (message.method && message.id !== undefined) requests[message.method] = (requests[message.method] ?? 0) + 1;
+    if (!message.method) {
+      // Begin indexing only once the client answered the create request with null.
+      if (message.id === 'progress-create' && message.result === null && !message.error) send({ method: '$/progress', params: { token: indexToken, value: { kind: 'begin', title: 'indexing', percentage: 0 } } });
+    } else if (message.method === 'initialize') {
       if (process.argv.includes('init-hang')) continue;
       if (message.params.capabilities.general.positionEncodings[0] !== 'utf-16') process.exit(5);
       send({ id: message.id, result: { capabilities: { positionEncoding: 'utf-16' } } });
@@ -28,11 +51,14 @@ process.stdin.on('data', chunk => {
       send({ id: 'server-request', method: 'workspace/configuration', params: { items: [{ section: 'clangd' }] } });
     } else if (message.method === '$/cancelRequest') cancellations.push(message.params.id);
     else if (message.method === 'textDocument/didClose') documents.delete(message.params.textDocument.uri);
-    else if (message.method === 'textDocument/didOpen') documents.set(message.params.textDocument.uri, message.params.textDocument);
-    else if (message.method === 'textDocument/didChange') {
+    else if (message.method === 'textDocument/didOpen') {
+      documents.set(message.params.textDocument.uri, message.params.textDocument);
+      opened(message.params.textDocument);
+    } else if (message.method === 'textDocument/didChange') {
       const doc = documents.get(message.params.textDocument.uri);
       doc.text = message.params.contentChanges[0].text;
       doc.version = message.params.textDocument.version;
+      opened(doc);
     } else if (message.method === 'textDocument/hover' || message.method === 'textDocument/definition') {
       const doc = documents.get(message.params.textDocument.uri);
       if (!initialized || !doc) process.exit(6);
@@ -40,9 +66,35 @@ process.stdin.on('data', chunk => {
       if (doc.text.includes('HANG')) continue;
       if (doc.text.includes('ERROR')) send({ id: message.id, error: { code: -32001, message: 'mock failure' } });
       else if (doc.text.includes('EMPTY')) send({ id: message.id, result: null });
-      else if (message.method.endsWith('hover')) send({ id: message.id, result: { contents: { kind: 'markdown', value: JSON.stringify({ text: doc.text, version: doc.version, position: message.params.position, buildDir, cancellations }) } } });
+      else if (message.method.endsWith('hover')) send({ id: message.id, result: { contents: { kind: 'markdown', value: JSON.stringify({ text: doc.text, version: doc.version, position: message.params.position, buildDir, cancellations, argv: process.argv.slice(2) }) } } });
       else send({ id: message.id, result: [{ targetUri: doc.uri, targetRange: { start: { line: 0, character: 0 }, end: { line: 2, character: 4 } }, targetSelectionRange: { start: { line: 1, character: 2 }, end: { line: 1, character: 5 } } }] });
+    } else if (message.method === 'textDocument/references') {
+      // REFS <n> answers with n references, one per line of the queried document.
+      const doc = documents.get(message.params.textDocument.uri);
+      const count = Number(/REFS (\d+)/.exec(doc?.text ?? '')?.[1] ?? 0);
+      send({ id: message.id, result: Array.from({ length: count }, (_, line) => ({ uri: doc.uri, range: { start: { line, character: 4 }, end: { line, character: 8 } } })) });
+    } else if (message.method === 'textDocument/prepareCallHierarchy') {
+      const range = { start: { line: 0, character: 4 }, end: { line: 0, character: 8 } };
+      send({ id: message.id, result: [{ name: 'caller', kind: 12, uri: message.params.textDocument.uri, range, selectionRange: range }] });
+    } else if (message.method === 'textDocument/prepareRename') {
+      // NO-RENAME refuses like clangd does at a position without a symbol.
+      const doc = documents.get(message.params.textDocument.uri);
+      const { line, character } = message.params.position;
+      if (doc?.text.includes('NO-RENAME')) send({ id: message.id, error: { code: -32001, message: 'Cannot rename symbol: there is no symbol at the given location' } });
+      else send({ id: message.id, result: { range: { start: { line, character }, end: { line, character: character + 4 } }, placeholder: 'name' } });
+    } else if (message.method === 'textDocument/rename') {
+      // RENAME-EDIT <path> answers with the WorkspaceEdit stored as JSON in that file.
+      // RENAME-TOUCH <path> first appends to that file, as if it changed after the client synced it.
+      const doc = documents.get(message.params.textDocument.uri);
+      const touch = /RENAME-TOUCH (\S+)/.exec(doc?.text ?? '')?.[1];
+      if (touch) appendFileSync(touch, '// changed on disk\n');
+      const edit = /RENAME-EDIT (\S+)/.exec(doc?.text ?? '')?.[1];
+      send({ id: message.id, result: edit ? JSON.parse(readFileSync(edit, 'utf8')) : null });
     } else if (message.method === 'shutdown') send({ id: message.id, result: null });
     else if (message.method === 'exit') process.exit(0);
+    else if (message.method === 'mock/requests') send({ id: message.id, result: requests });
+    else if (message.method === 'mock/documents') send({ id: message.id, result: [...documents.keys()] });
+    else if (message.method === 'mock/argv') send({ id: message.id, result: process.argv.slice(2) });
+    else if (message.id !== undefined) send({ id: message.id, error: { code: -32601, message: `method not found: ${message.method}` } });
   }
 });
