@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.14)
+project(drift LANGUAGES CXX)
+add_subdirectory(src/net)
+add_subdirectory(src/util)
+add_subdirectory(src/tie)
+add_executable(app src/a.cpp)
+target_link_libraries(app PRIVATE net util)
