@@ -290,6 +290,18 @@ test("a model change measures again only when the compilation database changed",
   assert.equal(probes.length, 2);
 });
 
+test("a reconfigure that leaves the compilation database unchanged does not restart the first measurement", async (t) => {
+  const { project: fake, model } = project(t, [{ name: "app", sources: ["src/app.cpp"] }]);
+  const { toolchain, probes } = service([]);
+  t.after(() => toolchain.close());
+  toolchain.attach(fake);
+  fake.change({ ...model }, false);
+  fake.change({ ...model }, false);
+  await toolchain.settled();
+  assert.equal(probes.length, 1);
+  assert.deepEqual(toolchain.profiles!.map(profile => profile.target), ["app"]);
+});
+
 test("a newer model replaces a measurement still running", async (t) => {
   const { project: fake, model } = project(t, [{ name: "first", sources: ["src/a.cpp"] }, { name: "second", standard: "20", sources: ["src/b.cpp"] }]);
   const { toolchain } = service([]);

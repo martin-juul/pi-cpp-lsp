@@ -503,7 +503,9 @@ export class ToolchainService {
     this.project = project;
     if (!project) return;
     this.unsubscribe = project.onModelChange(change => {
-      if (change.compileDatabaseChanged || !this.current) this.start(change.model, change.compileDatabase);
+      // Without a new compilation database a running first measurement is still current; restarting it on
+      // every reconfigure could keep it from ever finishing.
+      if (change.compileDatabaseChanged || (!this.current && !this.running)) this.start(change.model, change.compileDatabase);
     });
     if (project.model) this.start(project.model, join(project.model.buildDir, "compile_commands.json"));
   }
