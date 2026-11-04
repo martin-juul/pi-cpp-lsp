@@ -19,6 +19,7 @@ import { registerRenameTool } from "./lib/rename.ts";
 import { postEditNote, resolveToolPath, type PostEditOptions } from "./lib/diagnostics.ts";
 import { isSupportedCmake, probeCmake, supportsPresets, type CmakeVersion, type Exec } from "./lib/project/configure.ts";
 import { ToolchainService, type ToolchainServiceOptions } from "./lib/toolchain.ts";
+import { clangToolsGapNote } from "./lib/gap-notes.ts";
 
 const FIXED_GUIDELINES = [
   "Prefer smart pointers over raw new/delete in C++ code.",
@@ -115,8 +116,8 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
   });
 
   // Registered after session_start so the managed clangd attaches to the new project at once (KTD11).
-  const clangd = registerClangdTools(pi, { getProject: () => project });
-  registerNavigationTools(pi, clangd);
+  const clangd = registerClangdTools(pi, { getProject: () => project, gapProfileFor: file => toolchain.gapProfileFor(file) });
+  registerNavigationTools(pi, clangd, { gaps: () => toolchain.gapProfiles });
   registerRenameTool(pi, clangd, { exec, getProject: () => project, ...options.diagnostics });
 
   pi.on("session_shutdown", async () => {
@@ -286,8 +287,10 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
         }
       }
 
+      // After truncation, so a long tool output cannot cut the note off.
+      const gapNote = clangToolsGapNote(toolchain.gapProfileFor(file));
       return {
-        content: [{ type: "text", text: truncateOutput(`Compilation database: ${database ?? "none found"}\n\n${results.join("\n\n")}`) }],
+        content: [{ type: "text", text: truncateOutput(`Compilation database: ${database ?? "none found"}\n\n${results.join("\n\n")}`) + (gapNote ? `\n\n${gapNote}` : "") }],
         details: { file: params.file, tool, database, success: !failed },
         isError: failed,
       };

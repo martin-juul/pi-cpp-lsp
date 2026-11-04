@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { bounded, ClangdUnsupportedError, location, position, waitFor, type ClangdConnection, type IndexState, type ManagedClangd } from "./clangd.ts";
+import { navigationGapNote } from "./gap-notes.ts";
+import type { TargetProfile } from "./toolchain.ts";
 
 /** Entries listed per result; the rest are counted as omitted. */
 const MAX_ENTRIES = 100;
@@ -190,13 +192,18 @@ const types: NavigationTool = {
   },
 };
 
+export interface NavigationOptions {
+  /** The measured targets whose build compiler supports features clangd lacks; results then say usages may be missing. */
+  gaps?: () => readonly TargetProfile[];
+}
+
 /**
  * Registers cpp_references, cpp_symbols, cpp_calls and cpp_types (R21–R23, KTD15). They always use
  * the session's managed, background-indexed clangd connection: a connection for an explicit
  * build_dir has no index, so project-wide answers from it would be silently partial. Without a ready
  * project model the tools return an error that says so.
  */
-export function registerNavigationTools(pi: ExtensionAPI, managed: Pick<ManagedClangd, "connection">): void {
+export function registerNavigationTools(pi: ExtensionAPI, managed: Pick<ManagedClangd, "connection">, options: NavigationOptions = {}): void {
   for (const tool of [references, symbols, calls, types]) {
     pi.registerTool({
       name: tool.name, label: tool.label, description: tool.description, promptSnippet: tool.promptSnippet, parameters: tool.parameters,
@@ -210,7 +217,8 @@ export function registerNavigationTools(pi: ExtensionAPI, managed: Pick<ManagedC
         try {
           const answer = await tool.run(params, ctx.cwd, connect, signal);
           const note = tool.indexed(params) && connection ? indexNote(connection.indexState) : undefined;
-          const text = bounded(answer.text) + (note ? `\n${note}` : "");
+          const gapNote = navigationGapNote(options.gaps?.() ?? []);
+          const text = bounded(answer.text) + (note ? `\n${note}` : "") + (gapNote ? `\n${gapNote}` : "");
           return { content: [{ type: "text", text }], details: { ...answer.details, found: answer.found, indexState: connection?.indexState } };
         } catch (error) {
           if (error instanceof ClangdUnsupportedError) {
