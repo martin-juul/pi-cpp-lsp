@@ -157,7 +157,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
       // Format, drift, owner and clangd diagnostics in one note (KTD13).
       note = input.path
         ? await postEditNote(resolveToolPath(ctx.cwd, input.path), {
-          exec, cwd: ctx.cwd, project, clangd, ...options.diagnostics,
+          exec, cwd: ctx.cwd, project, clangd, toolchain, ...options.diagnostics,
         })
         : await project?.reportPoint();
     } else if (event.toolName === "bash") {
