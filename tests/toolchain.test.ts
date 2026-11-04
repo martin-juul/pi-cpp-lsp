@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
 import type { CompilationEntry } from "../extensions/lib/compdb.ts";
 import type { Exec } from "../extensions/lib/project/configure.ts";
-import { measureClangd, measureCompiler, parseMacros, presentFeatures, probeSource } from "../extensions/lib/toolchain.ts";
+import type { ProjectModel, ProjectTarget } from "../extensions/lib/project/model.ts";
+import { catalogStandard, measureClangd, measureCompiler, parseMacros, presentFeatures, probeSource, ToolchainService, type ToolchainProject } from "../extensions/lib/toolchain.ts";
 
 const mockClangd = resolve("tests/fixtures/mock-clangd.mjs");
 const mock = (...features: string[]) => ({ command: process.execPath, args: [mockClangd, `--mock-features=${features.join(",")}`], timeoutMs: 2000 });
@@ -51,21 +52,23 @@ test("a GCC 16 dump reports contracts available and reflection behind -freflecti
   assert.ok(result.available.includes("embed"));
   assert.ok(!result.available.includes("reflection"));
   assert.deepEqual(result.needsFlag, { reflection: "-freflection", meta: "-freflection" });
-  // One plain probe, one with the flag; both run the entry's flags in its directory without its source or outputs.
-  assert.equal(calls.length, 2);
+  // One plain probe, then one per enabling flag (-fmodules finds nothing in this dump); all run the
+  // entry's flags in its directory without its source or outputs.
+  assert.deepEqual(calls.map(call => call.args.filter(arg => arg === "-freflection" || arg === "-fmodules")), [[], ["-fmodules"], ["-freflection"]]);
   assert.deepEqual(calls[0]!.args.slice(0, 2), ["-I../include", "-std=c++26"]);
   assert.ok(!calls[0]!.args.includes("../src/a.cpp") && !calls[0]!.args.includes("-o"));
   assert.equal(calls[0]!.options?.cwd, "/project/build");
   assert.ok(!existsSync(calls[0]!.args.at(-1)!), "the probe directory is removed afterwards");
 });
 
-test("a target that already passes -freflection gets reflection as available, with no second probe", async () => {
+test("a target that already passes -freflection gets reflection as available, with no -freflection probe", async () => {
   const { exec, calls } = fakeCompiler(() => ({ stdout: GCC16_REFLECTION }));
   const result = await measureCompiler(entry(["g++", "-std=c++26", "-freflection"]), exec);
   assert.ok(result.ok);
   assert.ok(result.available.includes("reflection") && result.available.includes("meta"));
   assert.deepEqual(result.needsFlag, {});
-  assert.equal(calls.length, 1);
+  assert.ok(!calls.some(call => call.args.filter(arg => arg === "-freflection").length > 1));
+  assert.equal(calls.length, 2, "only the -fmodules probe follows");
 });
 
 test("a failing -freflection probe leaves reflection missing and keeps the first result", async () => {
@@ -90,10 +93,17 @@ test("a clang dump gets no flag probe, and #embed counts through __has_embed", a
   assert.equal(calls.length, 1);
 });
 
-test("a macro below the catalog's C++26 value counts as missing", () => {
+test("a macro without a value does not hide the next line of the dump", () => {
+  const macros = parseMacros("#define __STRICT_ANSI__\n#define __cpp_concepts 202002L\n#define F(x) x\n#define __cpp_lambdas 200907L");
+  assert.equal(macros.get("__STRICT_ANSI__"), "");
+  assert.equal(macros.get("__cpp_concepts"), "202002L");
+  assert.equal(macros.get("__cpp_lambdas"), "200907L");
+});
+
+test("a macro below a feature's value counts as missing for that feature", () => {
   // __cpp_structured_bindings 201606L is C++17; C++26 binding packs need 202411L.
   const present = presentFeatures(parseMacros("#define __cpp_structured_bindings 201606L\n#define __cpp_pack_indexing 202311L"));
-  assert.deepEqual([...present], ["pack_indexing"]);
+  assert.deepEqual([...present], ["structured_bindings", "pack_indexing"]);
 });
 
 test("a failing first probe or an unsupported compiler gives a reason instead of throwing", async () => {
@@ -152,6 +162,146 @@ test("real clangd 23+ under a GCC reflection command lacks reflection and contra
   assert.ok(result.ok, !result.ok ? result.reason : "");
   assert.ok(!result.available.includes("reflection") && !result.available.includes("contracts"));
   assert.ok(result.available.includes("pack_indexing") && result.available.includes("embed"));
+});
+
+// ---------------------------------------------------------------------------
+// The per-session service
+
+/** A project tree with a compilation database, and a model whose targets the test names. */
+function project(t: { after: (fn: () => void) => void }, targets: { name: string; standard?: string; sources: string[]; flags?: string[]; includeDirs?: string[] }[]) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "cpp-toolchain-test-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const build = join(root, "build");
+  mkdirSync(build);
+  mkdirSync(join(root, "src"));
+  mkdirSync(join(root, "include"));
+  const entries: object[] = [];
+  const modelTargets = targets.map((spec): ProjectTarget => {
+    const standard = spec.standard ?? "26";
+    const sources = spec.sources.map(file => {
+      const path = join(root, file);
+      writeFileSync(path, "");
+      entries.push({ directory: build, file: path, arguments: ["g++", ...(spec.flags ?? []), `-std=c++${standard}`, "-c", path] });
+      return { path, isGenerated: false, language: "CXX", standard, backtrace: [] };
+    });
+    return {
+      name: spec.name, id: spec.name, type: "EXECUTABLE", kind: "executable", isProjectTarget: true, sourceDir: root, sources,
+      cxxStandard: standard, includeDirs: (spec.includeDirs ?? []).map(dir => join(root, dir)), defines: [], dependencies: [], artifacts: [], backtrace: [],
+    };
+  });
+  writeFileSync(join(build, "compile_commands.json"), JSON.stringify(entries));
+  const model: ProjectModel = { sourceRoot: root, buildDir: build, indexFile: "", cmakeVersion: "4.4", configuration: "Debug", targets: modelTargets, cmakeInputs: [], notes: [] };
+  const listeners = new Set<(change: { model: ProjectModel; compileDatabase: string; compileDatabaseChanged: boolean }) => void>();
+  const fake: ToolchainProject & { change(next: ProjectModel, compileDatabaseChanged: boolean): void } = {
+    model,
+    onModelChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    change(next, compileDatabaseChanged) {
+      (fake as { model: ProjectModel }).model = next;
+      for (const listener of listeners) listener({ model: next, compileDatabase: join(build, "compile_commands.json"), compileDatabaseChanged });
+    },
+  };
+  return { root, model, project: fake };
+}
+
+const C20 = "#define __cpp_concepts 202002L\n#define __cpp_lib_span 202002L";
+
+/** g++ answers with GCC 16's C++26 dump plus C++20 macros; `-DOLD` drops contracts. Counts plain probes. */
+function service(clangdFeatures: string[]) {
+  const probes: string[][] = [];
+  const exec: Exec = async (_command, args) => {
+    if (!args.some(arg => arg === "-freflection" || arg === "-fmodules")) probes.push(args);
+    const dump = `${C20}\n${GCC16}`.split("\n").filter(line => !(args.includes("-DOLD") && line.includes("__cpp_contracts"))).join("\n");
+    return { stdout: dump, stderr: "", code: 0, killed: false };
+  };
+  return { probes, toolchain: new ToolchainService({ exec, clangd: mock(...clangdFeatures), clangdTimeoutMs: 2000 }) };
+}
+
+test("standards map to the newest catalog standard not newer than them", () => {
+  assert.deepEqual(["98", "03", "11", "14", "17", "20", "23", "26", "29", undefined].map(catalogStandard), [undefined, undefined, 11, 14, 17, 20, 23, 26, 26, undefined]);
+});
+
+test("only targets on C++11 or newer are measured, each for its own standard's features", async (t) => {
+  const { project: fake } = project(t, [
+    { name: "app", sources: ["src/app.cpp"] },
+    { name: "lib", standard: "20", sources: ["src/lib.cpp"] },
+    { name: "legacy", standard: "03", sources: ["src/legacy.cpp"] },
+  ]);
+  const { toolchain } = service(["structured_bindings", "concepts", "span", "pack_indexing"]);
+  t.after(() => toolchain.close());
+  toolchain.attach(fake);
+  await toolchain.settled();
+  const profiles = toolchain.profiles!;
+  assert.deepEqual(profiles.map(profile => [profile.target, profile.standard]), [["app", 26], ["lib", 20]]);
+  const lib = profiles.find(profile => profile.target === "lib")!;
+  // The dump's __cpp_structured_bindings 202411 also counts as C++17 structured bindings.
+  assert.deepEqual(lib.available, ["structured_bindings", "concepts", "span"]);
+  assert.equal(lib.gap, false);
+  const app = profiles.find(profile => profile.target === "app")!;
+  assert.equal(app.compiler, "g++ 16");
+  assert.ok(app.available.includes("contracts") && app.available.includes("concepts"));
+  assert.ok(app.clangdLacks.includes("contracts") && !app.clangdLacks.includes("pack_indexing"));
+  assert.equal(app.gap, true);
+});
+
+test("targets sharing a compile command share one measurement, and a target's groups intersect", async (t) => {
+  const { project: fake } = project(t, [
+    { name: "one", sources: ["src/a.cpp", "src/b.cpp"] },
+    { name: "two", sources: ["src/c.cpp"] },
+    { name: "mixed", sources: ["src/d.cpp"], flags: ["-DOLD"] },
+  ]);
+  // A second group for "mixed": same target, but this source compiles without -DOLD.
+  const { toolchain, probes } = service([]);
+  t.after(() => toolchain.close());
+  const model = fake.model!;
+  const mixed = model.targets.find(target => target.name === "mixed")!;
+  (mixed.sources as unknown[]).push(model.targets[0]!.sources[0]);
+  toolchain.attach(fake);
+  await toolchain.settled();
+  assert.equal(probes.length, 2, "one probe for the shared command, one for -DOLD");
+  const profile = toolchain.profiles!.find(profile => profile.target === "mixed")!;
+  assert.ok(!profile.available.includes("contracts"), "the -DOLD group lacks contracts, so the target does");
+});
+
+test("a model change measures again only when the compilation database changed", async (t) => {
+  const { project: fake, model } = project(t, [{ name: "app", sources: ["src/app.cpp"] }]);
+  const { toolchain, probes } = service([]);
+  t.after(() => toolchain.close());
+  toolchain.attach(fake);
+  await toolchain.settled();
+  fake.change({ ...model }, false);
+  await toolchain.settled();
+  assert.equal(probes.length, 1);
+  fake.change({ ...model }, true);
+  await toolchain.settled();
+  assert.equal(probes.length, 2);
+});
+
+test("a newer model replaces a measurement still running", async (t) => {
+  const { project: fake, model } = project(t, [{ name: "first", sources: ["src/a.cpp"] }, { name: "second", standard: "20", sources: ["src/b.cpp"] }]);
+  const { toolchain } = service([]);
+  t.after(() => toolchain.close());
+  toolchain.attach(fake);
+  fake.change({ ...model, targets: model.targets.filter(target => target.name === "second") }, true);
+  await toolchain.settled();
+  assert.deepEqual(toolchain.profiles!.map(profile => profile.target), ["second"]);
+});
+
+test("a file belongs to the gap profile of its owner, and an unowned header to the target that includes its directory", async (t) => {
+  const { root, project: fake } = project(t, [
+    { name: "gap", sources: ["src/gap.cpp"], includeDirs: ["include"] },
+    { name: "clean", standard: "20", sources: ["src/clean.cpp"] },
+  ]);
+  writeFileSync(join(root, "include", "api.hpp"), "");
+  writeFileSync(join(root, "src", "stray.hpp"), "");
+  const { toolchain } = service(["structured_bindings", "concepts", "span"]);
+  t.after(() => toolchain.close());
+  toolchain.attach(fake);
+  await toolchain.settled();
+  assert.equal(toolchain.gapProfileFor(join(root, "src", "gap.cpp"))?.target, "gap");
+  assert.equal(toolchain.gapProfileFor(join(root, "include", "api.hpp"))?.target, "gap");
+  assert.equal(toolchain.gapProfileFor(join(root, "src", "stray.hpp")), undefined);
+  assert.equal(toolchain.gapProfileFor(join(root, "src", "clean.cpp")), undefined);
+  assert.deepEqual(toolchain.gapProfiles.map(profile => profile.target), ["gap"]);
 });
 
 // Keep the fixture reader used so a broken mock fails loudly rather than skipping.

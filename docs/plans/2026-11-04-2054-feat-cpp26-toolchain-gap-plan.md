@@ -12,7 +12,7 @@ execution: code
 
 ## Goal Capsule
 
-- **Objective:** In a CMake project with C++26 targets, pi knows which C++26 features its toolchain actually accepts, and the extension stops reporting code the build compiler accepts as broken. C++26 idiom guidance and contract-violation reporting are not part of this plan.
+- **Objective:** In a CMake project with targets on C++11 or newer, pi knows which features of each target's standard its toolchain actually accepts, and the extension stops reporting code the build compiler accepts as broken. C++26 idiom guidance and contract-violation reporting are not part of this plan.
 - **Means:** A per-session toolchain service. It measures the build compiler with each target's own compile command (KTD1) and clangd with a short-lived probe process (KTD2). It compares the two, and diagnostics, navigation and rename consult the result (KTD6).
 - **Product authority:** The Product Contract below owns behavior. On implementation mechanism, the Planning Contract's KTDs win within the cited R constraints. The repo owner decides any scope change.
 - **Stop conditions:** Stop and ask if clangd cannot evaluate a probe document under a GCC compile command (KTD2), or if compiling headers on their own produces false errors in the GCC 16 fixture (KTD7). Either would change how R2 or R8 can be met.
@@ -25,7 +25,7 @@ execution: code
 
 ### Summary
 
-For each C++26 target, the extension measures which C++26 features the build compiler supports with that target's flags, and which ones clangd supports. The session briefing and `/cpp-setup` report the result, including where clangd is behind. When clangd is behind and reports errors on an edited file, the build compiler re-checks the file and its result replaces clangd's. Navigation results say usages may be missing, and a rename is followed by a compiler check of the targets it affects.
+For each target on C++11 or newer, the extension measures which features of the C++11 to C++26 standards, up to the target's own standard, the build compiler supports with that target's flags, and which ones clangd supports. The session briefing and `/cpp-setup` report the result, including where clangd is behind. When clangd is behind and reports errors on an edited file, the build compiler re-checks the file and its result replaces clangd's. Navigation results say usages may be missing, and a rename is followed by a compiler check of the targets it affects.
 
 ### Problem Frame
 
@@ -39,6 +39,7 @@ The extension's own feedback is built on clang. The post-edit note, every naviga
 
 ### Key Decisions
 
+- **Every target on C++11 or newer gets the same treatment as C++26 ones, and the briefing lists every feature of a target's standard, not only the gaps.** (session-settled: user-directed — chosen over listing only missing, flag-gated and clangd-lacking features for older standards, or using them for gap handling only: the user wants the full picture for every standard, from C++11 on.) Governs R1, R3, R6.
 - **This plan covers the gap between the toolchain and clangd: feature detection plus false-error handling.** Feature detection is the base the false-error handling needs. (session-settled: user-approved — chosen over a feature-aware briefing alone, C++26 idiom guidance, or contract-violation parsing: those other areas can follow separately.)
 - **Measure feature support. Don't look it up in a version table.** A version table would get GCC 16 wrong, because reflection depends on a per-target flag, not on the compiler version. (session-settled: user-approved — chosen over a compiler/clangd version table or learning only from clangd–compiler disagreements: the table misses flag-gated features, and learning reactively can't feed the briefing.) Governs R1–R4.
 - **The build compiler decides whether there are errors after an edit.** (session-settled: user-approved — chosen over labeling clangd's errors as likely false, or hiding them: labels are guesses, and hiding them misses real errors.) Governs R8–R11.
@@ -56,25 +57,25 @@ This plan covers the gap between the toolchain and clangd: feature detection and
 
 - C++26 idiom guidance (for C++26 targets, suggest contracts over `assert`, `std::inplace_vector`, saturation arithmetic): Depends on this plan's feature detection (R1–R4), so it suggests only features the toolchain accepts. Still to decide whether it's wanted at all.
 - Contract-violation reporting in `cpp_run` and `cpp_test`: Can proceed independently of this plan.
-- C++20 modules (`.cppm` and `.ixx` sources, `import std;`, module flags that `cpp_compile` rejects today): Can proceed independently of this plan. It isn't a C++26 feature.
+- C++20 modules support (`.cppm` and `.ixx` sources, building with `import std;`): Can proceed independently of this plan. This plan only reports whether the toolchain offers modules and `import std`.
 
 ---
 
 ### Requirements
 
-A *gap target* is a C++26 target whose build compiler supports at least one listed feature that clangd does not.
+A *measured target* is a project target on C++11 or newer. A *gap target* is a measured target whose build compiler supports at least one listed feature that clangd does not.
 
 **Feature detection**
 
-- R1. For each C++26 target, the extension determines which listed features the target's build compiler supports, using the compiler and flags that target actually compiles with.
+- R1. For each measured target, the extension determines which listed features of its standard the target's build compiler supports, using the compiler and flags that target actually compiles with.
 - R2. The extension determines which listed features the managed clangd supports.
-- R3. The listed features are the C++26 features that have feature-test macros. Language: static reflection, contracts, pack indexing, `#embed`, expansion statements, constexpr exceptions, the `_` placeholder, `= delete("reason")`, structured binding packs, variadic friends and trivial relocatability. Library: the `<meta>` reflection library, `std::inplace_vector`, saturation arithmetic, `std::text_encoding`, `std::hive`, `std::execution`, `std::linalg` and library hardening.
+- R3. The listed features are the C++11 to C++26 features that have feature-test macros (or, for `[[assume]]`, a `__has_cpp_attribute` test). A target is measured for the features of its own standard and the ones before it. C++11 (language only; C++11 library additions have no macros): rvalue references, lambdas, `constexpr`, variadic templates, `static_assert`, `decltype`, alias templates, range-based for, initializer lists, delegating and inheriting constructors, default member initializers, raw and unicode string literals, user-defined literals, attributes, ref-qualifiers and thread-safe static initialization. C++14 language: generic lambdas, init captures, relaxed `constexpr`, return type deduction, `decltype(auto)`, binary literals, variable templates, aggregates with default member initializers and sized deallocation. C++14 library: `std::make_unique`, `std::integer_sequence`, `std::exchange`, `std::shared_timed_mutex`, chrono and string literals, transparent comparators and `std::quoted`. C++17 language: structured bindings, `if constexpr`, inline variables, fold expressions, class template argument deduction, `auto` template parameters, guaranteed copy elision, aligned `new`, `noexcept` in the type system, hexadecimal float literals, `constexpr` lambdas, capturing `*this`, aggregates with base classes and variadic `using`. C++17 library: `std::optional`, `std::variant`, `std::any`, `std::string_view`, `std::filesystem`, `std::apply`, `std::invoke`, `std::byte`, `std::to_chars`, `std::shared_mutex`, `std::scoped_lock`, `std::gcd`/`std::lcm` and parallel algorithms. C++20 language: concepts, coroutines, modules, three-way comparison, `consteval`, `constinit`, designated initializers, `char8_t`, `using enum`, parenthesized aggregate initialization, conditional `explicit`, class-type template arguments and `constexpr` dynamic allocation. C++20 library: ranges, `std::format`, `std::span`, `std::source_location`, `std::jthread`, `std::bit_cast`, `<numbers>` and `<semaphore>`. C++23 language: deducing `this`, `if consteval`, multidimensional subscript, static `operator()`, `auto(x)`, the `uz` literal suffix, named character escapes, simpler implicit move, `[[assume]]` and `std::float16_t`. C++23 library: `std::expected`, `std::print`, `std::mdspan`, `std::generator`, `std::flat_map`, `std::stacktrace`, `import std`, `ranges::to`, `std::unreachable`, `std::move_only_function`, `std::byteswap` and `string::contains`. C++26 language: static reflection, contracts, pack indexing, `#embed`, expansion statements, constexpr exceptions, the `_` placeholder, `= delete("reason")`, structured binding packs, variadic friends and trivial relocatability. Library: the `<meta>` reflection library, `std::inplace_vector`, saturation arithmetic, `std::text_encoding`, `std::hive`, `std::execution`, `std::linalg` and library hardening.
 - R4. A feature the compiler offers only behind a flag the target doesn't pass is reported as "needs `<flag>`", not as available. Example: reflection on GCC 16 without `-freflection`.
 - R5. Detection results are refreshed whenever a configure changes a target's compiler or flags.
 
 **Briefing and setup**
 
-- R6. The session briefing lists, for each C++26 target, the features it can use, the features that need a flag, and the features clangd lacks. Targets with identical results are grouped.
+- R6. The session briefing lists, for each measured target, every feature of its standard it can use, the features that need a flag, and the features clangd lacks. Targets with identical results are grouped.
 - R7. `/cpp-setup` shows the listed features for the default C++ compiler and for clangd side by side.
 
 **Post-edit diagnostics**
@@ -120,7 +121,7 @@ A *gap target* is a C++26 target whose build compiler supports at least one list
 ### Scope Boundaries
 
 - C++26 idiom guidance and contract-violation reporting are separate areas (see How This Work Fits Together).
-- Modules, and C++23 or older targets, are out of scope.
+- Building or checking modules is out of scope; R3 only reports them. C++98/03 targets and targets on the compiler's default standard are not measured.
 - Projects without a CMake project model are out of scope. This includes standalone `cpp_compile`, which keeps its C++17 default.
 - `cpp_hover`, `cpp_definition` and `cpp_check` get a note only (R16). They are not rerouted to the compiler.
 - Catching the reverse gap after an edit (code clangd accepts that the build compiler rejects) is not covered. The briefing is the only guard (AE6).
@@ -156,18 +157,18 @@ A *gap target* is a C++26 target whose build compiler supports at least one list
 
 ### Product Contract Preservation
 
-Product Contract unchanged, except that the four "Deferred to Planning" questions are now answered by KTD2 (how clangd is measured), KTD5 (no cross-session cache), KTD11 (time limits) and KTD12 (clang-tidy's features). The Outstanding Questions section was removed because nothing is left open.
+Changed: R1, R3, R6 and the scope boundary on older targets — the user extended the work to every standard from C++11 on, with full feature lists, during implementation (see the Key Decision). Otherwise unchanged, except that the four "Deferred to Planning" questions are now answered by KTD2 (how clangd is measured), KTD5 (no cross-session cache), KTD11 (time limits) and KTD12 (clang-tidy's features). The Outstanding Questions section was removed because nothing is left open.
 
 ### Key Technical Decisions
 
-- KTD1. **Measure the compiler by dumping its macros with the target's own compile command.** Take the compilation database entry of one source per C++26 compile group, swap its source file for a probe that includes `<version>`, and run the same compiler and flags with `-dM -E`. The probe evaluates each catalog entry's condition in the preprocessor and defines a marker macro for every feature that is present. The condition is the feature-test macro at R3's threshold. For `#embed` it is that macro or `defined(__has_embed)`, because clang 19 and newer accept `#embed` without defining `__cpp_pp_embed`. Read the markers, and read `__clang__` / `__GNUC__` to tell the compiler family. Using the real command means flags such as `-freflection`, `-stdlib=libc++` or a cross toolchain count automatically. Governs R1, R3.
+- KTD1. **Measure the compiler by dumping its macros with the target's own compile command.** Take the compilation database entry of one source per compile group of a measured target, swap its source file for a probe that includes `<version>`, and run the same compiler and flags with `-dM -E`. The probe evaluates each catalog entry's condition in the preprocessor and defines a marker macro for every feature that is present. The condition is the feature-test macro at R3's threshold. For `#embed` it is that macro or `defined(__has_embed)`, because clang 19 and newer accept `#embed` without defining `__cpp_pp_embed`. Read the markers, and read `__clang__` / `__GNUC__` to tell the compiler family. Using the real command means flags such as `-freflection`, `-stdlib=libc++` or a cross toolchain count automatically. Governs R1, R3.
 - KTD2. **Measure clangd in its own short-lived clangd process, with the same probe turning each present feature's marker into a `#warning`.** The probe sits in a temporary directory, next to a temporary `compile_commands.json` that gives it the same compile command as KTD1. The extension opens it, collects the warnings from the published diagnostics, and closes the process. Before the probe runs, `-w` and any flag that silences `#warning` are removed from its command. clangd has no way to dump its macros, and asking it is the only measurement that matches what clangd actually parses. A clang binary of the same version is not guaranteed to be installed. (session-settled: user-approved — chosen over opening the probe in the session's managed clangd: a separate process cannot disturb the background index or the post-edit connection.) Governs R2.
 - KTD3. **Find flag-gated features by probing again with the flag added.** The R3 catalog lists the flag that enables a feature, per compiler family. Today that is one entry: GCC's `-freflection` for reflection and `<meta>`. When the family matches and the macro is missing, KTD1 runs once more with the flag. A feature that appears only then is "needs `-freflection`". A second probe that fails means the compiler does not support the flag: GCC 15 and older reject `-freflection`, and GCC 16 rejects it below C++26. The gated feature then stays missing, and the first probe's result stands. Governs R4.
-- KTD4. **Measure one compile command group at a time, and only for C++26 targets.** A C++26 target is one whose `cxxStandard` ranks 26 or newer, so every C++ compile group of the target is C++26 or newer. Groups with the same compiler and flags (ignoring the source file and output flags) share one measurement. A target's profile is the intersection of its groups' results. A target is a gap target when the compiler's available features include something clangd lacks. (session-settled: user-approved — chosen over covering targets that mix C++23 and C++26 sources: mixed targets are rare, and the intersection would hide the C++26 groups anyway.) Governs R1, R6.
+- KTD4. **Measure per compile command group, and only for targets on C++11 or newer.** A measured target is one whose `cxxStandard` ranks C++11 or newer, so every C++ compile group of the target is C++11 or newer. Its feature set is the catalog's entries up to that standard, so a C++20 target never lists C++23 features as missing. Groups with the same compiler and flags (ignoring the source file and output flags) share one measurement. A target's profile is the intersection of its groups' results. A target is a gap target when the compiler's available features include something clangd lacks. (session-settled: user-approved — chosen over covering a target by its newest group: the intersection with its oldest group decides what code in the target can use.) Governs R1, R6.
 - KTD5. **Keep measurements in memory for the session, and measure again when the compilation database changes.** The service listens to `ProjectService.onModelChange` and runs again when `compileDatabaseChanged` is set. Nothing goes to disk. (session-settled: user-approved — chosen over a cache in the managed cache directory: a compiler upgrade would then be hidden behind stale data, and measuring takes about a second.) Governs R5.
 - KTD6. **A separate toolchain service owns the measurements, and the other parts read from it.** It sits next to `ManagedClangd`, created once in `extensions/index.ts` and attached to the session's project the way `ManagedClangd.attach` is. `ProjectService` reads it through an optional provider for the briefing. The post-edit pipeline, navigation, rename, `cpp_check`, `cpp_hover` and `cpp_definition` ask it whether a file belongs to a gap target. If measurement has not finished when the first briefing goes out, the feature section arrives once in the next run's update message. (session-settled: user-approved — chosen over holding the briefing until measurement finishes: the briefing is not delayed.) Governs R6, R8, R12, R13, R16.
 - KTD7. **The compiler check reuses `cpp_compile`'s invocation for sources and compiles headers on their own.** A source with a database entry goes through `resolveCompileInvocation`, the same path `cpp_compile` uses. A header has no entry, so it borrows its profile's compile command, with the header as input, `-x c++` and the "pragma once in main file" warning switched off. (session-settled: user-approved — chosen over skipping the compiler for headers: reflection code usually lives in headers, and leaving them out would keep most of the false errors.) Governs R8.
-- KTD8. **A header no target lists belongs to the C++26 target whose include directories contain it.** The first matching gap target wins. When none matches, the file is not in a gap target, so R10 applies. (session-settled: user-approved — chosen over treating every unowned header as gap: in a mixed project that would send clean clang targets' headers to the wrong compiler.) Governs R8, R10.
+- KTD8. **A header no target lists belongs to the measured target whose include directories contain it.** The first matching gap target wins. When none matches, the file is not in a gap target, so R10 applies. (session-settled: user-approved — chosen over treating every unowned header as gap: in a mixed project that would send clean clang targets' headers to the wrong compiler.) Governs R8, R10.
 - KTD9. **Read the compiler's plain-text diagnostics.** For GCC, add `-fdiagnostics-plain-output`. For clang, add `-fno-color-diagnostics -fno-caret-diagnostics`. Keep the `path:line:col: error|warning: message` lines and drop notes and context lines. Render them in the post-edit note's existing format: errors first, at most 20. GCC's SARIF or JSON formats would mean a second output parser for one consumer. Governs R8, R9.
 - KTD10. **The post-rename check compiles only gap targets.** The affected targets are the owners of the changed files plus every target that depends on them, directly or indirectly. Of those, only gap targets are checked, because clangd indexed the others fully. A changed header with no owner makes every gap target affected. Up to four compiles run at once. (session-settled: user-approved — chosen over checking every affected target: non-gap targets cannot hold usages clangd missed.) Governs R13.
 - KTD11. **Time limits: 15 seconds for the post-edit compiler check and 60 seconds for the whole post-rename check.** 15 seconds is half of `cpp_compile`'s 30-second timeout, because the check runs inside every erroring edit. A post-rename check that hits its limit lists the targets it did not reach. (session-settled: user-approved — proposed in the plan synthesis and confirmed.) Governs R11, R15.
@@ -233,7 +234,7 @@ flowchart TB
 
 ### U1. Feature catalog and compiler measurement
 
-**Goal:** Know which listed C++26 features a compile command supports, including flag-gated ones.
+**Goal:** Know which listed features a compile command supports, including flag-gated ones.
 
 **Requirements:** R1, R3, R4
 
@@ -302,7 +303,7 @@ flowchart TB
 
 ### U3. Toolchain service
 
-**Goal:** Per-session profiles for each C++26 target, kept current with the project model, and answers to "is this file in a gap target?".
+**Goal:** Per-session profiles for each measured target, kept current with the project model, and answers to "is this file in a gap target?".
 
 **Requirements:** R1, R2, R5, R8 (ownership), R10
 
@@ -316,7 +317,7 @@ flowchart TB
 
 **Approach:**
 
-1. On a model change with `compileDatabaseChanged`, or the first model, select C++26 targets (KTD4). Group their sources' database entries by command and measure each group with U1 and U2, at most two groups at a time.
+1. On a model change with `compileDatabaseChanged`, or the first model, select measured targets (KTD4). Group their sources' database entries by command and measure each group with U1 and U2, at most two groups at a time.
 2. Build per-target profiles and the gap-target set. Expose a ready promise, the current profiles, and a lookup for a file's gap profile that applies KTD8 to unowned headers.
 3. A newer model cancels an older measurement in flight (KTD5).
 
@@ -324,9 +325,9 @@ flowchart TB
 
 **Test scenarios:**
 
-- A model with a C++26 GCC target and a C++20 target measures only the C++26 one.
+- A model with a C++26 GCC target, a C++20 target and a C++03 target measures the first two, and the C++20 target's profile holds only C++11-to-C++20 features.
 - Two targets with identical commands share one measurement, so the fake `Exec` sees one probe per command.
-- A target with two C++26 groups gets the intersection of the two results.
+- A target with two groups gets the intersection of the two results.
 - A GCC 16 profile and a clangd profile that both report `#embed` (one by macro, one by `__has_embed`) do not make the target a gap target for `#embed`.
 - A model change without `compileDatabaseChanged` does not measure again. One with it does.
 - An unowned header under a gap target's include directory resolves to that target. A header outside every include directory resolves to no gap.
@@ -351,7 +352,7 @@ flowchart TB
 
 **Approach:**
 
-1. The briefing gains a "C++26 features" section for C++26 targets, grouping targets with identical profiles: available features, features that need a flag, and features clangd lacks.
+1. The briefing gains a "C++ features" section for measured targets, grouping targets with identical profiles: available features, features that need a flag, and features clangd lacks.
 2. If the provider is not ready when the briefing is rendered, the section says the check is running, and the next `runMessage` carries the section once as an update.
 3. `/cpp-setup` measures `$CXX` or else `c++` with `-std=c++26`, and clangd with the same command, using U1 and U2 directly. It then prints the two lists side by side.
 
@@ -361,9 +362,9 @@ flowchart TB
 
 - Covers AE4. A GCC 16 target without `-freflection` shows reflection under "needs `-freflection`" and contracts under available.
 - Two targets with the same profile appear on one line.
-- With no C++26 targets, the section is absent.
+- With no measured targets, the section is absent.
 - A briefing rendered before the provider is ready says the check is running, and the next run message carries the section exactly once.
-- The summary form still fits `BRIEFING_BUDGET` with ten C++26 targets in three distinct profiles.
+- The summary form still fits `BRIEFING_BUDGET` with ten measured targets in three distinct profiles.
 - `/cpp-setup` with a fake compiler and the mock clangd prints both feature lists. With no `c++` on PATH it says so instead of failing.
 
 **Verification:** A session on a C++26 fixture shows the feature section in the first briefing or in the first update after it.
@@ -470,7 +471,7 @@ flowchart TB
 
 ### U8. Documentation
 
-**Goal:** Users can find out what the feature profile means and what changes in C++26 projects.
+**Goal:** Users can find out what the feature profile means and what changes in C++11-or-newer projects.
 
 **Requirements:** R6, R7, R8, R12, R13, R16
 
@@ -478,9 +479,9 @@ flowchart TB
 
 **Files:**
 
-- Modify: `README.md` (C++26 feature section, post-edit compiler check, version-requirements row)
+- Modify: `README.md` (C++ feature section, post-edit compiler check, version-requirements row)
 - Modify: `CHANGELOG.md` (Unreleased entries)
-- Modify: `skills/cpp-setup/SKILL.md` (`/cpp-setup` now lists C++26 features)
+- Modify: `skills/cpp-setup/SKILL.md` (`/cpp-setup` now lists the features of each standard from C++11 to C++26)
 
 **Approach:** Describe behavior in the README's existing plain style. Name GCC 16 with `-freflection` as the case where clangd is behind.
 
@@ -508,5 +509,5 @@ flowchart TB
 - `npm run typecheck`, `npm test` and markdownlint pass locally and in CI.
 - On a machine with GCC 16, the gated real-toolchain tests run and pass.
 - No probe file, temporary `compile_commands.json` or clangd probe process remains after the test suite, and fixture trees are unchanged.
-- Projects without C++26 targets see byte-identical briefing, post-edit, navigation and rename output.
+- Projects without measured targets see byte-identical briefing, post-edit, navigation and rename output.
 - No dead-end or experimental code from abandoned approaches remains in the diff.

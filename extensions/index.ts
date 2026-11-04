@@ -18,6 +18,7 @@ import { registerNavigationTools } from "./lib/navigation.ts";
 import { registerRenameTool } from "./lib/rename.ts";
 import { postEditNote, resolveToolPath, type PostEditOptions } from "./lib/diagnostics.ts";
 import { isSupportedCmake, probeCmake, supportsPresets, type CmakeVersion, type Exec } from "./lib/project/configure.ts";
+import { ToolchainService, type ToolchainServiceOptions } from "./lib/toolchain.ts";
 
 const FIXED_GUIDELINES = [
   "Prefer smart pointers over raw new/delete in C++ code.",
@@ -59,6 +60,8 @@ export interface ExtensionOptions {
   project?: Pick<ProjectServiceOptions, "waitMs">;
   /** Overrides for the post-edit diagnostics wait bounds. */
   diagnostics?: Pick<PostEditOptions, "waitMs" | "firstOpenWaitMs">;
+  /** How the feature probes start clangd, and their bound. */
+  toolchain?: Pick<ToolchainServiceOptions, "clangd" | "clangdTimeoutMs">;
 }
 
 function truncateOutput(output: string): string {
@@ -94,6 +97,8 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
 
   // ── CMake project session ──────────────────────────────────────
   let project: ProjectService | undefined;
+  // Which C++ features the build compiler and clangd support, per target on C++11 or newer.
+  const toolchain = new ToolchainService({ exec, ...options.toolchain });
 
   pi.on("session_start", async (_event, ctx) => {
     project?.dispose();
@@ -106,6 +111,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
       // Configuring runs the repository's CMake code: only in projects pi trusts.
       trusted: ctx.isProjectTrusted(),
     });
+    toolchain.attach(project);
   });
 
   // Registered after session_start so the managed clangd attaches to the new project at once (KTD11).
@@ -114,6 +120,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
   registerRenameTool(pi, clangd, { exec, getProject: () => project, ...options.diagnostics });
 
   pi.on("session_shutdown", async () => {
+    toolchain.close();
     project?.dispose();
     project = undefined;
   });
