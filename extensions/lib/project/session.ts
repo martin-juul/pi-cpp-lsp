@@ -1,7 +1,8 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
-  BRIEFING_BUDGET, describeFinding, describeResolved, configureErrorExcerpt, displayPath, renderBriefing, type ProjectStatus,
+  BRIEFING_BUDGET, describeFinding, describeResolved, configureErrorExcerpt, displayPath, featureCheckRunning, featureUpdateLines, renderBriefing,
+  type FeatureState, type ProjectStatus,
 } from "./briefing.ts";
 import {
   ConfigureManager, isSupportedCmake, PRESET_FILES, probeCmake, resolvePreset, type CmakeVersion, type ConfigureResult, type Exec,
@@ -42,6 +43,8 @@ export interface ProjectServiceOptions {
    * cmake, git or ctest. Defaults to true.
    */
   trusted?: boolean;
+  /** The toolchain feature check's state, for the briefing's feature section. */
+  toolchain?: () => FeatureState;
 }
 
 export interface ModelChange {
@@ -111,6 +114,7 @@ export class ProjectService {
   readonly root?: string;
   private readonly exec: Exec;
   private readonly waitMs: number;
+  private readonly toolchain?: () => FeatureState;
   private readonly controller = new AbortController();
   private readonly ledger = new FindingsLedger();
   private readonly listeners = new Set<(change: ModelChange) => void>();
@@ -147,10 +151,13 @@ export class ProjectService {
   // KTD5 run state.
   private briefingDue = true;
   private loadingSent = false;
+  /** The briefing said the feature check was running; its results go out once they arrive. */
+  private featuresPending = false;
 
   constructor(options: ProjectServiceOptions) {
     this.exec = options.exec;
     this.waitMs = options.waitMs ?? REPORT_WAIT_MS;
+    this.toolchain = options.toolchain;
     this.root = findSourceRoot(options.cwd);
     this.nonCmake = this.root === undefined;
     if (this.root !== undefined && options.trusted === false) {
@@ -522,7 +529,7 @@ export class ProjectService {
     const deadline = Date.now() + this.waitMs;
     if (!(await settlesBy(this.initialized, deadline)) || this.nonCmake || this.controller.signal.aborted) return undefined;
     if (!this.briefingDue) {
-      const lines = await this.refresh(deadline, false);
+      const lines = [...await this.refresh(deadline, false), ...this.lateFeatureLines()];
       return lines.length > 0 ? { customType: UPDATE_MESSAGE, content: `${NOTE_PREFIX} ${lines.join("\n")}`, display: true } : undefined;
     }
     await this.refresh(deadline, true);
@@ -535,14 +542,24 @@ export class ProjectService {
       };
     }
     this.briefingDue = false;
+    this.featuresPending = featureCheckRunning(this.toolchain?.(), this.currentModel);
     return { customType: BRIEFING_MESSAGE, content: this.briefing(), display: true };
+  }
+
+  /** The feature section, once, when the check finished after a briefing that said it was running. */
+  private lateFeatureLines(): string[] {
+    if (!this.featuresPending) return [];
+    const state = this.toolchain?.();
+    if (state?.profiles === undefined && state?.measuring) return [];
+    this.featuresPending = false;
+    return featureUpdateLines(state?.profiles ?? []);
   }
 
   /** The full briefing for the current state; past `budget` characters it takes the summary form. */
   briefing(budget = BRIEFING_BUDGET): string {
     return renderBriefing({
       root: this.root!, status: this.status, model: this.currentModel, result: this.result, modelError: this.modelError,
-      findings: this.ledger.open, referenced: this.referenced, skipped: this.skipped,
+      findings: this.ledger.open, referenced: this.referenced, skipped: this.skipped, features: this.toolchain?.(),
     }, budget);
   }
 }

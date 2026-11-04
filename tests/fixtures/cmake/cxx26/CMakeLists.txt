@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.28)
+project(cxx26 LANGUAGES CXX)
+add_executable(app src/main.cpp)
+target_compile_features(app PRIVATE cxx_std_26)
+target_compile_options(app PRIVATE -freflection)
+target_include_directories(app PRIVATE include)

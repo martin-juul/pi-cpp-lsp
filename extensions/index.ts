@@ -18,6 +18,8 @@ import { registerNavigationTools } from "./lib/navigation.ts";
 import { registerRenameTool } from "./lib/rename.ts";
 import { postEditNote, resolveToolPath, type PostEditOptions } from "./lib/diagnostics.ts";
 import { isSupportedCmake, probeCmake, supportsPresets, type CmakeVersion, type Exec } from "./lib/project/configure.ts";
+import { setupFeatureLines, ToolchainService, type ToolchainServiceOptions } from "./lib/toolchain.ts";
+import { projectLog, type Log } from "./lib/log.ts";
 
 const FIXED_GUIDELINES = [
   "Prefer smart pointers over raw new/delete in C++ code.",
@@ -59,6 +61,8 @@ export interface ExtensionOptions {
   project?: Pick<ProjectServiceOptions, "waitMs">;
   /** Overrides for the post-edit diagnostics wait bounds. */
   diagnostics?: Pick<PostEditOptions, "waitMs" | "firstOpenWaitMs">;
+  /** How the feature probes start clangd, and their bound. */
+  toolchain?: Pick<ToolchainServiceOptions, "clangd" | "clangdTimeoutMs">;
 }
 
 function truncateOutput(output: string): string {
@@ -94,6 +98,11 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
 
   // ── CMake project session ──────────────────────────────────────
   let project: ProjectService | undefined;
+  // Which C++ features the build compiler and clangd support, per target on C++11 or newer.
+  // What the extension cannot do (a feature clangd lacks, a check that could not run) goes to the
+  // project's log in the managed cache, so tool results carry no notes that repeat on every call.
+  const log: Log = message => { if (project?.root) projectLog(project.root)(message); };
+  const toolchain = new ToolchainService({ exec, log, ...options.toolchain });
 
   pi.on("session_start", async (_event, ctx) => {
     project?.dispose();
@@ -105,15 +114,19 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
       waitMs: options.project?.waitMs,
       // Configuring runs the repository's CMake code: only in projects pi trusts.
       trusted: ctx.isProjectTrusted(),
+      // The briefing lists each measured target's C++ features.
+      toolchain: () => toolchain,
     });
+    toolchain.attach(project);
   });
 
   // Registered after session_start so the managed clangd attaches to the new project at once (KTD11).
   const clangd = registerClangdTools(pi, { getProject: () => project });
   registerNavigationTools(pi, clangd);
-  registerRenameTool(pi, clangd, { exec, getProject: () => project, ...options.diagnostics });
+  registerRenameTool(pi, clangd, { exec, getProject: () => project, toolchain, log, ...options.diagnostics });
 
   pi.on("session_shutdown", async () => {
+    toolchain.close();
     project?.dispose();
     project = undefined;
   });
@@ -149,7 +162,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
       // Format, drift, owner and clangd diagnostics in one note (KTD13).
       note = input.path
         ? await postEditNote(resolveToolPath(ctx.cwd, input.path), {
-          exec, cwd: ctx.cwd, project, clangd, ...options.diagnostics,
+          exec, cwd: ctx.cwd, project, clangd, toolchain, log, ...options.diagnostics,
         })
         : await project?.reportPoint();
     } else if (event.toolName === "bash") {
@@ -195,6 +208,9 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
           results.push(`✗ ${tool.name}: not found — install with: ${tool.install}`);
         }
       }
+
+      // Which C++ features the default compiler and clangd support, side by side.
+      results.push(...await setupFeatureLines(exec, options.toolchain));
 
       ctx.ui.notify(results.join("\n"), "info");
     },

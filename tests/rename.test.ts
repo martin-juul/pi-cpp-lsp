@@ -338,3 +338,146 @@ describe("real clangd rename across more than 50 files", { skip: !(clangdAvailab
     assert.match(await readFile(join(h.root, "widely.h"), "utf8"), /int broadly_used\(int value\);/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Build check after a rename in projects whose build compiler supports features clangd lacks
+
+type TargetSpec = { name: string; gap?: boolean; dependencies?: string[]; sources: Record<string, string> };
+
+/**
+ * A mock-clangd project with named targets, a compilation database and a toolchain whose gap targets
+ * are the specs marked `gap`. The fake compiler answers each checked source with `output(file)`, after
+ * `delayMs`; like pi.exec it is killed at its timeout.
+ */
+async function gapProject(t: any, specs: TargetSpec[], files: Record<string, string>, edit: (root: string) => unknown, options: { output?: (file: string) => string; delayMs?: number; renameCheckMs?: number } = {}) {
+  const root = realpathSync(await mkdtemp(join(tmpdir(), "pi-rename-gap-")));
+  const buildDir = join(root, "managed");
+  await mkdir(buildDir);
+  const write = async (name: string, content: string) => {
+    await mkdir(resolve(join(root, name), ".."), { recursive: true });
+    await writeFile(join(root, name), content);
+  };
+  for (const [name, content] of Object.entries(files)) await write(name, content);
+  const editFile = join(root, "managed", "edit.json");
+  await writeFile(editFile, JSON.stringify(edit(root)));
+  const source = join(root, "main.cpp");
+  await writeFile(source, `INDEX-END\nRENAME-EDIT ${editFile}\n`);
+  const entries: object[] = [{ directory: buildDir, file: source, arguments: ["g++", "-std=c++26", "-c", source] }];
+  const targets = [];
+  for (const spec of specs) {
+    const sources = [];
+    for (const [name, content] of Object.entries(spec.sources)) {
+      await write(name, content);
+      const path = join(root, name);
+      entries.push({ directory: buildDir, file: path, arguments: ["g++", "-std=c++26", "-c", path] });
+      sources.push({ path, isGenerated: false, language: "CXX", standard: "26", backtrace: [] });
+    }
+    targets.push({ name: spec.name, id: spec.name, type: "EXECUTABLE", kind: "executable", isProjectTarget: true, sourceDir: root, sources, cxxStandard: "26", includeDirs: [], defines: [], dependencies: spec.dependencies ?? [], artifacts: [], backtrace: [] });
+  }
+  await writeFile(join(buildDir, "compile_commands.json"), JSON.stringify(entries));
+  const model = { sourceRoot: root, buildDir, targets } as unknown as ProjectModel;
+  const project = { model, onModelChange: () => () => {}, reportPoint: async () => undefined, ownerOf: () => undefined } as unknown as Project;
+  const profiles = specs.filter(spec => spec.gap).map(spec => ({
+    target: spec.name, standard: 26 as const, compiler: "g++ 16", family: "gcc" as const, available: ["contracts"], needsFlag: {}, clangdLacks: ["contracts"], gap: true,
+    entry: { file: join(root, Object.keys(spec.sources)[0]!), directory: buildDir, argv: ["g++", "-std=c++26", "-c", join(root, Object.keys(spec.sources)[0]!)] },
+  }));
+  const profileOf = new Map(specs.flatMap(spec => Object.keys(spec.sources).map(name => [join(root, name), profiles.find(profile => profile.target === spec.name)] as const)));
+  const toolchain = { gapProfiles: profiles, gapProfileFor: (file: string) => profileOf.get(file) };
+  const compiled: string[] = [];
+  const exec: Exec = async (command, args, execOptions) => {
+    if (command === "clang-format") return { stdout: "", stderr: "clang-format: not found", code: 127, killed: false };
+    const file = args.find(arg => profileOf.has(arg) || arg === source)!;
+    compiled.push(file);
+    const delay = options.delayMs ?? 0;
+    if (execOptions?.timeout !== undefined && execOptions.timeout < delay) {
+      await new Promise(done => setTimeout(done, execOptions.timeout));
+      return { stdout: "", stderr: "", code: 1, killed: true };
+    }
+    if (delay) await new Promise(done => setTimeout(done, delay));
+    const stderr = options.output?.(file) ?? "";
+    return { stdout: "", stderr, code: stderr.includes("error:") ? 1 : 0, killed: false };
+  };
+  const logged: string[] = [];
+  const registered = register({ command: process.execPath, args: [mock], timeoutMs: 2000 }, () => project, { exec, toolchain, renameCheckMs: options.renameCheckMs, log: line => logged.push(line) });
+  t.after(async () => {
+    await registered.emit("session_shutdown");
+    await rm(root, { recursive: true, force: true });
+  });
+  await registered.emit("session_start");
+  return { root, compiled, logged, call: caller(registered.tools, root) };
+}
+
+const renameIn = (...names: string[]) => (root: string) => ({
+  changes: Object.fromEntries(names.map(name => [uri(join(root, name)), [{ range: range(0, 4, 12), newText: "new_name" }]])),
+});
+
+test("a rename whose dependents in a gap target no longer compile stays applied and lists the errors", async t => {
+  const h = await gapProject(t, [
+    { name: "lib", sources: { "lib.cpp": "int old_name();\n" } },
+    { name: "app", gap: true, dependencies: ["lib"], sources: { "widget.cpp": "int x = old_name(); // uses contracts clangd cannot parse\n" } },
+  ], {}, renameIn("lib.cpp"), { output: file => file.endsWith("widget.cpp") ? `${file}:1:9: error: 'old_name' was not declared in this scope\n` : "" });
+  const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
+  assert.equal(result.isError, false, result.text);
+  assert.match(await readFile(join(h.root, "lib.cpp"), "utf8"), /int new_name\(\);/);
+  assert.match(result.text, /widget\.cpp:1:9: error: 'old_name' was not declared in this scope/);
+  assert.match(result.text, /the build may be broken/);
+  assert.ok(!h.compiled.some(file => file.endsWith("lib.cpp")), "lib is not a gap target, so it is not compiled");
+});
+
+test("changed files in a gap target show the compiler's verdict instead of clangd's errors, compiled once each", async t => {
+  const h = await gapProject(t, [
+    { name: "app", gap: true, sources: { "a.cpp": "int old_name(); // DIAG\n", "b.cpp": "int old_name(); // DIAG\n" } },
+  ], {}, renameIn("a.cpp", "b.cpp"));
+  const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
+  assert.equal(result.isError, false, result.text);
+  assert.doesNotMatch(result.text, /mock error/);
+  assert.equal(result.text.match(/checked by g\+\+ 16$/gm)?.length, 2, result.text);
+  assert.deepEqual(h.compiled.filter(file => /[ab]\.cpp$/.test(file)).sort(), [join(h.root, "a.cpp"), join(h.root, "b.cpp")]);
+  assert.doesNotMatch(result.text, /the build may be broken/);
+});
+
+test("a dependent the compiler could not check is logged, and the check never claims no errors", async t => {
+  const h = await gapProject(t, [
+    { name: "lib", sources: { "lib.cpp": "int old_name();\n" } },
+    { name: "app", gap: true, dependencies: ["lib"], sources: { "widget.cpp": "int x = old_name();\n" } },
+  ], {}, renameIn("lib.cpp"), { output: file => file.endsWith("widget.cpp") ? "widget.cpp:1:9: internal compiler error: in tsubst, at cp/pt.cc:1\n" : "" });
+  const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
+  assert.equal(result.isError, false, result.text);
+  assert.match(result.text, /1 file could not be checked; see the pi-cpp-lsp log/);
+  assert.doesNotMatch(result.text, /no errors|internal compiler error/);
+  assert.match(h.logged.join("\n"), /could not check .*widget\.cpp: widget\.cpp:1:9: internal compiler error/);
+  assert.deepEqual(result.details.uncheckable.map((entry: { file: string }) => entry.file), [join(h.root, "widget.cpp")]);
+});
+
+test("a rename in a project without gap targets runs no compiler", async t => {
+  const h = await gapProject(t, [{ name: "app", sources: { "a.cpp": "int old_name();\n" } }], {}, renameIn("a.cpp"));
+  const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
+  assert.equal(result.isError, false, result.text);
+  assert.deepEqual(h.compiled, []);
+});
+
+test("a check that runs out of time says so and logs the targets it did not reach", async t => {
+  const h = await gapProject(t, [
+    { name: "app", gap: true, sources: { "a.cpp": "int old_name(); // DIAG\n" } },
+  ], {}, renameIn("a.cpp"), { delayMs: 500, renameCheckMs: 100 });
+  const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
+  assert.equal(result.isError, false, result.text);
+  assert.match(result.text, /not every file was checked within 0\.1s; see the pi-cpp-lsp log/);
+  assert.match(h.logged.join("\n"), /not checked within 0\.1s: app/);
+  // The changed file keeps clangd's errors; why the compiler did not judge it is in the log.
+  assert.match(result.text, /mock error/);
+  assert.doesNotMatch(result.text, /warning: clangd lacks/);
+  assert.match(h.logged.join("\n"), /a\.cpp: g\+\+ 16 could not check it/);
+});
+
+test("a changed header no target lists makes every gap target part of the check", async t => {
+  const h = await gapProject(t, [
+    { name: "app", gap: true, sources: { "app.cpp": "#include \"api.h\"\n" } },
+    { name: "tool", gap: true, sources: { "tool.cpp": "#include \"api.h\"\n" } },
+    { name: "clean", sources: { "clean.cpp": "int y;\n" } },
+  ], { "api.h": "int old_name();\n" }, renameIn("api.h"));
+  const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
+  assert.equal(result.isError, false, result.text);
+  assert.ok(h.compiled.includes(join(h.root, "app.cpp")) && h.compiled.includes(join(h.root, "tool.cpp")), h.compiled.join(","));
+  assert.ok(!h.compiled.includes(join(h.root, "clean.cpp")));
+});

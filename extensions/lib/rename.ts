@@ -5,15 +5,25 @@ import { chmod, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bounded, position, waitFor, type ManagedClangd } from "./clangd.ts";
-import { cwdDisplayPath, postEditLines, postEditText, type PostEditOptions } from "./diagnostics.ts";
+import {
+  checkedBy, checkWithCompiler, COMPILER_CHECK_TIMEOUT_MS, cwdDisplayPath, MAX_DIAGNOSTICS, postEditLines, postEditText, renderCompilerProblems,
+  uncheckedEntry, type CompilerCheck, type CompilerProblem, type PostEditOptions,
+} from "./diagnostics.ts";
 import { plural } from "./output.ts";
 import type { Exec } from "./project/configure.ts";
-import { bestRealPath, isInSkippedDir, isWithin } from "./project/model.ts";
+import { loadCompilationDatabase, type CompilationEntry } from "./compdb.ts";
+import { bestRealPath, findTarget, isInSkippedDir, isWithin, ownersOf, type ProjectModel } from "./project/model.ts";
 import { projectCacheDir } from "./project/root.ts";
 import type { ProjectService } from "./project/session.ts";
+import type { Log } from "./log.ts";
+import { mapLimited, type TargetProfile, type ToolchainService } from "./toolchain.ts";
 
 /** How long a rename waits for clangd's background index to become idle (KTD14 step 2). */
 export const INDEX_WAIT_MS = 30_000;
+/** The whole compiler check after a rename finishes within this. */
+export const RENAME_CHECK_MS = 60_000;
+/** Compiles the check after a rename runs at once. */
+const RENAME_CHECK_CONCURRENCY = 4;
 
 const NO_PROJECT = "Rename needs the CMake project model and its managed clangd index, and none is ready: this is not a CMake project, or its configure is still running or failed. Check with cpp_project.";
 
@@ -30,6 +40,129 @@ export interface RenameToolOptions extends Pick<PostEditOptions, "waitMs" | "fir
   indexWaitMs?: number;
   /** Writes one file's new text; defaults to a temporary file renamed into place. */
   write?: (file: string, text: string) => Promise<void>;
+  /**
+   * The session's C++ feature profiles. In a project whose build compiler supports features clangd
+   * lacks, clangd's index can miss uses in code that uses them, so the build compiler checks the
+   * targets the rename can affect.
+   */
+  toolchain?: Pick<ToolchainService, "gapProfiles" | "gapProfileFor">;
+  /** Bound for that check; defaults to RENAME_CHECK_MS. */
+  renameCheckMs?: number;
+  /** Where the files and targets that check could not cover are recorded. */
+  log?: Log;
+}
+
+interface BuildCheck {
+  /** The verdict per checked file; a file missing here was not reached in time. */
+  results: Map<string, CompilerCheck>;
+  /** The gap targets whose sources were not all checked. */
+  unchecked: string[];
+  /** The gap targets the check covered, in model order. */
+  targets: TargetProfile[];
+  /** A checked file has a compiler error. */
+  broken: boolean;
+  /** Files other than the changed ones the compiler could not check in time or at all, with why. */
+  failed: { file: string; reason: string }[];
+}
+
+/**
+ * The gap targets a rename of `changed` can break: the owners of the changed files and every target
+ * that depends on them, directly or not, keeping only gap targets, since clangd indexed the others in
+ * full. A changed file no target lists, such as a header, could be included anywhere, so then every
+ * gap target counts.
+ */
+function affectedGapTargets(model: ProjectModel, changed: string[], gaps: readonly TargetProfile[]): TargetProfile[] {
+  const byName = new Map(gaps.map(profile => [profile.target, profile]));
+  const affected = new Set<string>();
+  let unowned = false;
+  for (const file of changed) {
+    const owners = ownersOf(model, file).filter(target => target.isProjectTarget);
+    if (owners.length === 0) unowned = true;
+    for (const owner of owners) affected.add(owner.name);
+  }
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const target of model.targets) {
+      if (!affected.has(target.name) && target.dependencies.some(dependency => affected.has(dependency))) {
+        affected.add(target.name);
+        grew = true;
+      }
+    }
+  }
+  return model.targets.map(target => byName.get(target.name)).filter((profile): profile is TargetProfile => !!profile && (unowned || affected.has(profile.target)));
+}
+
+/** Syntax-checks the C++ sources of `targets`, plus changed files of theirs that are not sources, within `limitMs`. */
+async function buildCheck(model: ProjectModel, targets: TargetProfile[], changed: string[], toolchain: NonNullable<RenameToolOptions["toolchain"]>, options: { exec: Exec; cwd: string; limitMs: number }): Promise<BuildCheck> {
+  const jobs: { file: string; profile: TargetProfile }[] = [];
+  const queued = new Set<string>();
+  const add = (file: string, profile: TargetProfile) => { if (!queued.has(file)) { queued.add(file); jobs.push({ file, profile }); } };
+  for (const profile of targets) {
+    for (const source of findTarget(model, profile.target)?.sources ?? []) if (source.language === "CXX" && !source.isGenerated) add(source.path, profile);
+  }
+  for (const file of changed) {
+    const profile = toolchain.gapProfileFor(file);
+    if (profile && targets.some(target => target.target === profile.target)) add(file, profile);
+  }
+  const deadline = Date.now() + options.limitMs;
+  // Loaded once: every source would otherwise read and parse the whole database again.
+  let entries: Map<string, CompilationEntry> | undefined;
+  try { entries = loadCompilationDatabase(join(model.buildDir, "compile_commands.json")); } catch { /* each check reports the database error */ }
+  const results = new Map<string, CompilerCheck>();
+  const unchecked = new Set<string>();
+  await mapLimited(jobs, RENAME_CHECK_CONCURRENCY, async ({ file, profile }) => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) { unchecked.add(profile.target); return; }
+    const result = await checkWithCompiler(file, profile, { exec: options.exec, cwd: options.cwd, buildDir: model.buildDir, entries, timeoutMs: Math.min(COMPILER_CHECK_TIMEOUT_MS, remaining) });
+    // A compile cut off by the overall limit was not reached; any other failure is the file's verdict.
+    if (!result.ok && Date.now() >= deadline) unchecked.add(profile.target);
+    else results.set(file, result);
+  });
+  const broken = [...results.values()].some(result => result.ok && result.problems.some(problem => problem.severity === "error"));
+  // A changed file's failure shows in its own entry; any other is a dependent the check never verified.
+  const failed = [...results].filter(([file, result]) => !result.ok && !changed.includes(file))
+    .map(([file, result]) => ({ file, reason: (result as Extract<CompilerCheck, { ok: false }>).reason }));
+  return { results, unchecked: targets.map(profile => profile.target).filter(name => unchecked.has(name)), targets, broken, failed };
+}
+
+const sameProblem = (a: CompilerProblem, b: CompilerProblem) => a.file === b.file && a.line === b.line && a.column === b.column && a.message === b.message;
+
+/** The note lines of a changed file in a gap target: clangd's diagnostics give way to the compiler's verdict. */
+function changedFileLines(file: string, noteLines: string[], profile: TargetProfile, check: CompilerCheck | undefined, cwd: string, log?: Log): string[] {
+  // The post-edit pipeline adds clangd's diagnostics last.
+  const index = noteLines.findIndex(line => line.startsWith("diagnostics"));
+  const before = index < 0 ? noteLines : noteLines.slice(0, index);
+  if (!check || !check.ok) {
+    log?.(uncheckedEntry(file, profile, check ? check.reason : "the check after the rename did not reach it in time"));
+    return noteLines;
+  }
+  return [...before, ...renderCompilerProblems(check.problems.filter(problem => problem.file === file), cwd), checkedBy(profile)];
+}
+
+/** The lines summing up the check: errors outside the changed files, whether the build may be broken, and what was not reached. */
+function buildCheckLines(check: BuildCheck, changed: Set<string>, limitMs: number, cwd: string, log?: Log): string[] {
+  const compilers = [...new Set(check.targets.map(profile => profile.compiler ?? "the build compiler"))].join(", ");
+  const errors: CompilerProblem[] = [];
+  for (const [file, result] of check.results) {
+    if (!result.ok) continue;
+    for (const problem of result.problems) {
+      if (problem.severity !== "error") continue;
+      if (changed.has(problem.file) && problem.file === file) continue;
+      if (!errors.some(seen => sameProblem(seen, problem))) errors.push(problem);
+    }
+  }
+  const lines = [`Build check by ${compilers} of ${check.targets.map(profile => profile.target).join(", ")}, whose code clangd may not have indexed in full:`];
+  if (errors.length > 0) {
+    lines.push(...renderCompilerProblems(errors.slice(0, MAX_DIAGNOSTICS), cwd).slice(1).map(line => `  ${line}`));
+    if (errors.length > MAX_DIAGNOSTICS) lines.push(`  [${errors.length - MAX_DIAGNOSTICS} more errors omitted]`);
+  }
+  // What the check could not cover goes to the log; the result only says that something was left out.
+  for (const { file, reason } of check.failed) log?.(`after a rename: could not check ${file}: ${reason}`);
+  if (check.unchecked.length > 0) log?.(`after a rename: not checked within ${Math.round(limitMs / 100) / 10}s: ${check.unchecked.join(", ")}`);
+  if (check.broken) lines.push("  the build may be broken: fix these errors; the rename was not undone");
+  else if (check.unchecked.length === 0 && check.failed.length === 0) lines.push("  no errors");
+  if (check.failed.length > 0 || check.unchecked.length > 0) lines.push(`  ${check.unchecked.length > 0 ? `not every file was checked within ${Math.round(limitMs / 100) / 10}s` : `${plural(check.failed.length, "file")} could not be checked`}; see the pi-cpp-lsp log`);
+  return lines;
 }
 
 /** A reason to refuse the whole rename, naming the offending file when there is one; nothing has been written. */
@@ -195,19 +328,37 @@ export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd
       }
 
       // Step 6: format and diagnose each file. The drift report point runs once for the whole rename.
-      // Without reportPoint the per-file pipeline skips the drift step.
+      // Without reportPoint the per-file pipeline skips the drift step. The pipeline gets no
+      // toolchain: the build check below compiles every file at most once, within its own limit.
       const perFile = { ownerOf: (path: string) => project.ownerOf(path) };
+      const notes = new Map<string, string[]>();
+      for (const entry of planned) {
+        notes.set(entry.file, await postEditLines(entry.file, { exec: options.exec, cwd: ctx.cwd, project: perFile, clangd: managed, waitMs: options.waitMs, firstOpenWaitMs: options.firstOpenWaitMs }));
+      }
+
+      const files = planned.map(entry => entry.file);
+      const model = project.model;
+      const toolchain = options.toolchain;
+      const targets = model && toolchain && toolchain.gapProfiles.length > 0 ? affectedGapTargets(model, files, toolchain.gapProfiles) : [];
+      const limitMs = options.renameCheckMs ?? RENAME_CHECK_MS;
+      const check = model && toolchain && targets.length > 0
+        ? await buildCheck(model, targets, files, toolchain, { exec: options.exec, cwd: ctx.cwd, limitMs })
+        : undefined;
+
       const changed: { file: string; edits: number; note?: string }[] = [];
       const lines = [`Renamed to ${params.new_name} in ${plural(planned.length, "file")}:`];
       for (const entry of planned) {
-        const noteLines = await postEditLines(entry.file, { exec: options.exec, cwd: ctx.cwd, project: perFile, clangd: managed, waitMs: options.waitMs, firstOpenWaitMs: options.firstOpenWaitMs });
+        let noteLines = notes.get(entry.file)!;
+        const profile = check ? toolchain?.gapProfileFor(entry.file) : undefined;
+        if (check && profile && check.targets.some(target => target.target === profile.target)) noteLines = changedFileLines(entry.file, noteLines, profile, check.results.get(entry.file), ctx.cwd, options.log);
         changed.push({ file: entry.file, edits: entry.edits, note: postEditText(noteLines) });
         lines.push(`${cwdDisplayPath(ctx.cwd, entry.file)}: ${plural(entry.edits, "edit")}`);
         if (noteLines.length > 0) lines.push(...noteLines.join("\n").split("\n").map(line => `  ${line}`));
       }
+      if (check) lines.push(...buildCheckLines(check, new Set(files), limitMs, ctx.cwd, options.log));
       const drift = await project.reportPoint().catch(() => undefined);
       if (drift) lines.push(drift);
-      return { content: [{ type: "text" as const, text: bounded(lines.join("\n")) }], details: { ...base, changed, drift } };
+      return { content: [{ type: "text" as const, text: bounded(lines.join("\n")) }], details: { ...base, changed, drift, ...(check ? { buildBroken: check.broken, unchecked: check.unchecked, uncheckable: check.failed } : {}) } };
     },
   });
 }

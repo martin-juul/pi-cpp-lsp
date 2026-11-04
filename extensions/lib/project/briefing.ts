@@ -3,6 +3,7 @@ import type { ConfigureResult } from "./configure.ts";
 import type { DriftFinding, ReferencedSource } from "./drift.ts";
 import { plural } from "../output.ts";
 import { formatStandard, ownersOf, type ProjectModel, type ProjectTarget } from "./model.ts";
+import { catalogStandard, featureLabels, FEATURES, STANDARDS, type Feature, type TargetProfile } from "../toolchain.ts";
 
 /** The briefing stays within this many characters (R7); larger projects get the summary form. */
 export const BRIEFING_BUDGET = 4_000;
@@ -26,6 +27,15 @@ export interface BriefingInput {
   referenced: readonly ReferencedSource[];
   /** Why unregistered files were not checked. */
   skipped?: string;
+  /** The toolchain feature check, when the session runs one. */
+  features?: FeatureState;
+}
+
+/** What the toolchain feature check knows so far. */
+export interface FeatureState {
+  /** Profiles of the measured targets; undefined before the first measurement finished. */
+  profiles?: readonly TargetProfile[];
+  measuring: boolean;
 }
 
 /** A path relative to the source root, or absolute when it lies outside. */
@@ -79,6 +89,96 @@ export function describeResolved(finding: DriftFinding, root: string, model: Pro
   if (!exists) return `${path} no longer exists.`;
   const owners = model ? ownersOf(model, finding.path).filter(target => target.isProjectTarget).map(target => target.name) : [];
   return owners.length > 0 ? `${path} is now built by ${owners.join(", ")}.` : `${path} is no longer reported as unregistered.`;
+}
+
+// ---------------------------------------------------------------------------
+// C++ features
+
+const FEATURES_INTRO = "What each target's build compiler accepts with the target's own flags, for the features of its standard and older ones. clangd may report false errors in code that uses a feature it lacks; the build compiler decides.";
+const FEATURE_CHECK_RUNNING = "The check of which C++ features each target's build compiler and clangd support is still running; its results follow in a later update.";
+/** Share of the summary budget the feature groups may take. */
+const SUMMARY_FEATURE_SHARE = 1 / 3;
+const SUMMARY_NAMED_TARGETS = 3;
+
+/** Whether the feature check has no results yet but will measure targets of this model. */
+export function featureCheckRunning(features: FeatureState | undefined, model: ProjectModel | undefined): boolean {
+  return !!features?.measuring && features.profiles === undefined
+    && !!model?.targets.some(target => target.isProjectTarget && catalogStandard(target.cxxStandard) !== undefined);
+}
+
+/** Targets with identical results, in first-seen order. */
+function profileGroups(profiles: readonly TargetProfile[]): { targets: string[]; profile: TargetProfile }[] {
+  const groups = new Map<string, { targets: string[]; profile: TargetProfile }>();
+  // A target the compiler could not be measured for has nothing to show; the reason is in the log.
+  for (const profile of profiles.filter(candidate => !candidate.error)) {
+    const key = JSON.stringify([profile.standard, profile.compiler, profile.available, Object.entries(profile.needsFlag).sort(), profile.clangdLacks]);
+    const group = groups.get(key);
+    if (group) group.targets.push(profile.target);
+    else groups.set(key, { targets: [profile.target], profile });
+  }
+  return [...groups.values()];
+}
+
+const groupTitle = (targets: string[], profile: TargetProfile) => `${targets.join(", ")} (C++${profile.standard}${profile.compiler ? `, ${profile.compiler}` : ""})`;
+
+/** "Needs `-freflection`: static reflection, <meta>" per enabling flag. */
+function flagParts(needsFlag: Record<string, string>, word = "needs"): string[] {
+  const byFlag = new Map<string, string[]>();
+  for (const [id, flag] of Object.entries(needsFlag)) byFlag.set(flag, [...(byFlag.get(flag) ?? []), id]);
+  return [...byFlag].map(([flag, ids]) => `${word} \`${flag}\`: ${featureLabels(ids)}`);
+}
+
+/** A group with every available feature listed per standard. */
+function detailedGroup(targets: string[], profile: TargetProfile): string[] {
+  const lines = [`- ${groupTitle(targets, profile)}:`];
+  for (const standard of STANDARDS.filter(standard => standard <= profile.standard)) {
+    const ids = profile.available.filter(id => FEATURES.some(feature => feature.id === id && feature.standard === standard));
+    lines.push(`  - C++${standard}: ${ids.length > 0 ? featureLabels(ids) : "none"}`);
+  }
+  for (const part of flagParts(profile.needsFlag, "Needs")) lines.push(`  - ${part}`);
+  if (profile.clangdLacks.length > 0) lines.push(`  - clangd lacks: ${featureLabels(profile.clangdLacks)}`);
+  return lines;
+}
+
+/** A group on one line, with counts instead of the available list. */
+function summarizedGroup(targets: string[], profile: TargetProfile): string {
+  const named = targets.length > SUMMARY_NAMED_TARGETS + 1
+    ? [...targets.slice(0, SUMMARY_NAMED_TARGETS), `and ${targets.length - SUMMARY_NAMED_TARGETS} more`]
+    : targets;
+  const title = groupTitle(named, profile);
+  const listed = FEATURES.filter(feature => feature.standard <= profile.standard).length;
+  const parts = [profile.available.length === listed ? `all ${listed} listed features available` : `${profile.available.length} of ${listed} listed features available`];
+  parts.push(...flagParts(profile.needsFlag));
+  if (profile.clangdLacks.length > 0) parts.push(`clangd lacks: ${featureLabels(profile.clangdLacks)}`);
+  return `- ${title}: ${parts.join("; ")}.`;
+}
+
+/** The summarized groups within `cap` characters, dropping groups from the end. */
+function summarizedGroups(profiles: readonly TargetProfile[], cap: number): string[] {
+  const lines = profileGroups(profiles).map(group => summarizedGroup(group.targets, group.profile));
+  for (let shown = lines.length; shown > 1; shown--) {
+    const kept = shown < lines.length ? [...lines.slice(0, shown), `- and ${plural(lines.length - shown, "more group")}.`] : lines;
+    if (kept.join("\n").length <= cap) return kept;
+  }
+  return lines.length > 1 ? [lines[0]!, `- and ${plural(lines.length - 1, "more group")}.`] : lines;
+}
+
+/** The feature section: every available feature (`detailed`), or one line per group of identical targets. */
+function featureSection(input: BriefingInput, detailed: boolean, cap = Infinity): string[] {
+  if (featureCheckRunning(input.features, input.model)) return ["## C++ features", FEATURE_CHECK_RUNNING];
+  const profiles = input.features?.profiles ?? [];
+  if (profileGroups(profiles).length === 0) return [];
+  if (detailed) return ["## C++ features", FEATURES_INTRO, ...profileGroups(profiles).flatMap(group => detailedGroup(group.targets, group.profile))];
+  return ["## C++ features (by group of targets with identical results; cpp_project overview lists every feature)", ...summarizedGroups(profiles, cap)];
+}
+
+/** The feature section as a late update, for a check that finished after the briefing went out. */
+export function featureUpdateLines(profiles: readonly TargetProfile[], budget = BRIEFING_BUDGET): string[] {
+  const groups = profileGroups(profiles);
+  if (groups.length === 0) return [];
+  const detailed = groups.flatMap(group => detailedGroup(group.targets, group.profile));
+  const body = detailed.join("\n").length <= budget ? detailed : [...summarizedGroups(profiles, budget), "cpp_project overview lists every feature."];
+  return [`C++ feature check finished. ${FEATURES_INTRO}`, ...body];
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +253,7 @@ function notes(input: BriefingInput): string[] {
   return [...(input.result?.notes ?? []), ...(input.model?.notes ?? [])];
 }
 
-function full(input: BriefingInput): string {
+function full(input: BriefingInput, detailedFeatures: boolean): string {
   const { root, model } = input;
   const lines = header(input);
   lines.push(...configureSection(input));
@@ -163,6 +263,7 @@ function full(input: BriefingInput): string {
     lines.push("## Targets", "| Target | Kind | Directories | Standard | Depends on |", "|---|---|---|---|---|", ...project.map(target => targetRow(root, target)));
     if (external.length > 0) lines.push(`Also ${plural(external.length, "target")} from outside the project: ${external.map(target => target.name).join(", ")}.`);
   }
+  lines.push(...featureSection(input, detailedFeatures));
   lines.push(...HINTS);
   if (input.findings.length > 0 || input.skipped) {
     lines.push(`## Drift (${input.findings.length} open)`, ...input.findings.map(finding => `- ${describeFinding(finding, root)}`));
@@ -193,6 +294,7 @@ function summary(input: BriefingInput, budget: number): string {
   if (noteCount > 0) counts.push(plural(noteCount, "model note"));
   if (counts.length > 0) tail.push(`${counts.join("; ")}.`);
   tail.push("This project is too large to brief in full. Use cpp_project for each target's directories, standard, dependencies and sources, for the drift list and for the model notes.");
+  tail.push(...featureSection(input, false, Math.floor(budget * SUMMARY_FEATURE_SHARE)));
   tail.push(...HINTS);
 
   if (model) {
@@ -217,8 +319,14 @@ function summary(input: BriefingInput, budget: number): string {
   return [...lines, ...tail].join("\n");
 }
 
-/** Render the session briefing (R6, R7): the full form within the budget, else a target-level summary. */
+/**
+ * Render the session briefing: the full form within the budget, then the full form with the
+ * features summarized per group, else a target-level summary.
+ */
 export function renderBriefing(input: BriefingInput, budget = BRIEFING_BUDGET): string {
-  const text = full(input);
-  return text.length <= budget ? text : summary(input, budget);
+  for (const detailedFeatures of [true, false]) {
+    const text = full(input, detailedFeatures);
+    if (text.length <= budget) return text;
+  }
+  return summary(input, budget);
 }

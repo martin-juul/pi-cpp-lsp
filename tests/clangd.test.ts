@@ -21,7 +21,7 @@ function register(options: ClangdToolOptions) {
   const emit = async (name: string, event: any = {}) => { for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, {}); };
   return { tools, managed, emit };
 }
-async function harness(t: any, options: ClangdOptions = { command: process.execPath, args: [fixture], timeoutMs: 1000 }) {
+async function harness(t: any, options: ClangdToolOptions = { command: process.execPath, args: [fixture], timeoutMs: 1000 }) {
   const cwd = await mkdtemp(join(tmpdir(), "pi-clangd-test-"));
   const file = join(cwd, "hello world.cpp");
   await writeFile(file, "int value = 42;\nint main() { return value; }\n");

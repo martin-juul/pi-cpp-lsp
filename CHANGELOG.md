@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-04
+
+### Added
+
+- C++ feature lists: for every target on C++11 or newer, the extension measures which C++11 to C++26 features the build compiler supports with the target's own compile command, and which ones clangd supports. The session briefing lists them per group of targets: the available features by standard, the features that need a flag such as GCC's `-freflection`, and the features clangd lacks.
+- When clangd reports errors on an edited file in a target whose build compiler supports features clangd lacks, the build compiler checks the file and its diagnostics replace clangd's in the post-edit note. If the compiler cannot check the file within 15 seconds, the note keeps clangd's diagnostics.
+- In such projects, `cpp_rename` syntax-checks the affected targets with the build compiler after renaming (within 60 seconds) and reports errors from uses clangd's index missed. The rename is not undone.
+- A per-project log, `pi-cpp-lsp.log` in the managed cache, records what the extension could not do: features clangd lacks, targets it could not measure, and files the compiler could not check. Tool results stay free of notes that would repeat on every call.
+- `/cpp-setup` compares, per standard, the C++ features of the default compiler (`$CXX`, else `c++`) and clangd.
+
+### Changed
+
+- **Behavior change:** the post-edit note can now come from the build compiler instead of clangd, the briefing has a C++ features section, and a rename in such projects ends with a build check.
+
+### Fixed
+
+- `cpp_compile` no longer refuses compilation database entries from CMake 3.28 and newer with Ninja, whose C++20-or-newer targets carry module-scanning flags.
+
 ## [1.2.0] - 2026-11-03
 
 ### Added
@@ -52,7 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/cpp-setup` toolchain check command and `cpp-setup` skill.
 - C++ guidelines injected into the system prompt.
 
-[Unreleased]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/martin-juul/pi-cpp-lsp/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.2.0...v2.0.0
 [1.2.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/martin-juul/pi-cpp-lsp/releases/tag/v1.0.0
