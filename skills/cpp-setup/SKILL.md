@@ -121,6 +121,7 @@ Use when starting C/C++ work in a new environment, when clangd can't find header
 - The `cpp_compile` tool uses `-fsyntax-only`, which is faster but skips linking, so it does not catch linker errors.
 - Use `cpp_build` after configuration to catch linker errors, then `cpp_test` to run CTest tests.
 - `cpp_hover` and `cpp_definition` use saved files and 1-based line/column positions (UTF-16 columns).
+- GCC 16 supports C++26 reflection only with `-freflection`. Add it to the target's compile options in `CMakeLists.txt`; the briefing lists reflection under "needs `-freflection`" until then.
 
 ## Verification
 
@@ -128,6 +129,7 @@ Use when starting C/C++ work in a new environment, when clangd can't find header
 - Outside CMake projects, `compile_commands.json` exists in project root
 - `cpp_check` and `cpp_compile` tools work on a sample `.cpp` file
 - `/cpp-setup` marks every clangd feature and CMake threshold you need as supported
+- `/cpp-setup` lists, per standard, the C++ features your compiler and clangd support. Features only the compiler supports are ones clangd will report false errors for; the extension then checks edits with the compiler instead
 - `cpp_hover` and `cpp_definition` resolve a known project symbol
 - In a CMake project, `cpp_project` with `action: overview` returns the project briefing, and `cpp_references` finds a known symbol's uses
 - For CMake projects with tests, `cpp_build` and `cpp_test` succeed

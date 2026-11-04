@@ -8,7 +8,7 @@
 
 A [pi](https://pi.dev) extension providing C/C++ development support: formatting, static analysis, project-aware compile checks, clangd navigation, and CMake builds and tests.
 
-In a CMake project, the extension configures its own build directory, reads the CMake File API, and tells pi how the project is built: targets, C++ standards, dependencies and source files that are not registered in any `CMakeLists.txt`. Navigation tools use a clangd background index, so pi can find references, callers and derived classes instead of using grep.
+In a CMake project, the extension configures its own build directory, reads the CMake File API, and tells pi how the project is built: targets, C++ standards, dependencies and source files that are not registered in any `CMakeLists.txt`. For every target on C++11 or newer, it also tells pi which C++ features the build compiler and clangd actually support. Navigation tools use a clangd background index, so pi can find references, callers and derived classes instead of using grep.
 
 ## Install
 
@@ -73,7 +73,7 @@ Configuring runs the project's CMake code, so it only happens in projects pi tru
 - **Session briefing.** The first prompt of a session carries a project briefing: the preset, configuration and generator; a table of targets with their kind, directories, C++ standard and dependencies; open drift findings; and notes. Large projects get a shorter summary, and `cpp_project overview` returns the full briefing. The briefing is sent again after a context compaction or a preset change.
 - **Drift notes.** After each `write`, `edit` and `bash` tool call, the extension checks the project again. If CMake files changed, it reconfigures first. A drift note lists new findings and findings that no longer hold. A source file (`.c`, `.cc`, `.cpp`, `.cxx`) in no target is reported with its likely owning target and the `CMakeLists.txt` line to edit. A source listed in CMake but missing on disk is reported with the line that lists it. The extension never edits build files; pi makes the edit.
 - **Not built in this configuration.** Source files that are named in a `CMakeLists.txt` but not built in the active configuration, for example behind an `option()` or a platform check, are listed as information in the briefing. They are never reported as drift.
-- **Post-edit note.** After a `write` or `edit` of a C/C++ file, one note reports the clang-format result, drift, the owning targets and the C++ standard the file must stay valid for, and clangd's diagnostics for the file. Errors come first, at most 20 diagnostics are listed, and the note reads "diagnostics pending" when clangd does not answer in time.
+- **Post-edit note.** After a `write` or `edit` of a C/C++ file, one note reports the clang-format result, drift, the owning targets and the C++ standard the file must stay valid for, and clangd's diagnostics for the file. Errors come first, at most 20 diagnostics are listed, and the note reads "diagnostics pending" when clangd does not answer in time. When clangd cannot parse features the build compiler supports, the build compiler checks the file instead (see [C++ Features](#c-features)).
 - **Presets.** With a `CMakePresets.json` or `CMakeUserPresets.json`, the extension uses the first configure preset whose name mentions `debug` or `dev`, or else the first one. `/cpp-preset` lists the presets and `/cpp-preset <name>` switches to one and reconfigures. The choice is remembered per project. Without a preset, the managed build uses `CMAKE_BUILD_TYPE=Debug`.
 - **Guidelines.** In a CMake session, the fixed guidelines below are replaced by one rule: write code that is valid for the C++ standard of the target that owns the file.
 
@@ -94,13 +94,27 @@ Outside a CMake project, in a project pi does not trust, or with CMake older tha
 
 When you omit `build_dir` and the project model is ready, `cpp_build`, `cpp_test`, `cpp_compile`, `cpp_check`, `cpp_hover` and `cpp_definition` now use the managed build directory instead of `build/` or the auto-detected compilation database. Each result names the directory or compilation database it used. Pass `build_dir` to use your own build directory. Outside a CMake project, or before the model is ready, the previous defaults apply.
 
+### C++ Features
+
+For every target on C++11 or newer, the extension asks the build compiler, with that target's own compile command, which features of the C++11 to C++26 standards it supports, up to the target's standard. It asks clangd the same question. The list covers the features that have feature-test macros, such as lambdas, `std::optional`, concepts, `std::expected`, contracts and static reflection.
+
+- **Briefing.** The session briefing has a "C++ features" section. For each group of targets with the same results it names the compiler and lists every available feature by standard, the features that need an extra flag (such as GCC's `-freflection` for reflection), and the features clangd lacks. A large project gets one summary line per group; `cpp_project overview` keeps the full list. If the check is still running when the briefing goes out, the results follow in the next update.
+- **When clangd is behind.** Compilers and clangd do not support the same features. GCC 16, for example, compiles C++26 contracts, and reflection with `-freflection`, but clangd 23 rejects both and reports errors on correct code. In a target where the build compiler supports features clangd lacks:
+  - After a `write` or `edit` that clangd reports errors for, the build compiler syntax-checks the file, and its diagnostics replace clangd's in the post-edit note. The note names the compiler. A header is compiled on its own with its target's flags. If the compiler cannot check the file within 15 seconds, the note keeps clangd's diagnostics with a warning that errors involving those features may be false. Edits clangd finds clean cost nothing extra.
+  - `cpp_references`, `cpp_symbols`, `cpp_calls` and `cpp_types` end with a line saying clangd lacks those features, so uses in code that uses them may be missing.
+  - After `cpp_rename`, the build compiler checks the targets the rename can affect (see [Navigation](#navigation)).
+  - `cpp_hover`, `cpp_definition` and `cpp_check` add a line saying clang-based tools lack those features.
+- **Lifetime.** Results are measured in the background when the project model is ready and again when `compile_commands.json` changes. They are kept in memory for the session only.
+
+Measuring runs the project's compiler, which only happens in projects pi trusts, like configuring. A target on C++98/03 or on the compiler's default standard is not measured.
+
 ### Project-Aware Checks
 
 `cpp_compile` uses `compile_commands.json` when available, preserving the source file's include paths, defines, language flags, and working directory. Use `build_dir` to select a custom compilation database directory. Explicit `compiler` and `standard` options override the database settings. Without a database, standalone checks use C17 for `.c` files and C++17 for C++ files.
 
 `cpp_check` also accepts `build_dir` to point clang-tidy at the project's compilation database. Compilation checks remain syntax-only; use `cpp_build` to catch linker errors.
 
-Database checks currently support direct GCC/Clang commands. Compiler wrappers, response files, MSVC commands, and module/plugin or compiler pass-through flags are reported as unsupported. A malformed database or missing source entry produces an error rather than silently using standalone flags.
+Database checks currently support direct GCC/Clang commands. The module-scanning flags CMake 3.28 and newer adds to C++20-or-newer targets are removed, so a source that imports modules still fails its check. Compiler wrappers, other response files, MSVC commands, and module/plugin or compiler pass-through flags are reported as unsupported. A malformed database or missing source entry produces an error rather than silently using standalone flags.
 
 ### Symbol Navigation
 
@@ -116,7 +130,7 @@ In a CMake project, the extension runs one clangd per session against the manage
 - `cpp_symbols` takes `query` to search the whole project by name, or `file` to outline one file with members nested under their class.
 - `cpp_calls` takes a position and `direction`: `incoming` (callers) or `outgoing` (callees).
 - `cpp_types` takes a position and `direction`: `supertypes` (base classes) or `subtypes` (derived classes).
-- `cpp_rename` takes a position and `new_name`, and edits every file that uses the symbol. The rename waits for the index. The whole rename is refused, with nothing changed, when clangd cannot rename the symbol, the index is still building, a file changed during the rename, or an edit would land outside the project or in a build or dependency directory. The result lists each changed file with its clangd diagnostics.
+- `cpp_rename` takes a position and `new_name`, and edits every file that uses the symbol. The rename waits for the index. The whole rename is refused, with nothing changed, when clangd cannot rename the symbol, the index is still building, a file changed during the rename, or an edit would land outside the project or in a build or dependency directory. The result lists each changed file with its clangd diagnostics. In a project where the build compiler supports C++ features clangd lacks, clangd's index can miss uses inside code that uses them. The build compiler then syntax-checks the affected targets clangd is behind on, within 60 seconds, and the result lists the errors it found and says the build may be broken. The rename is not undone.
 
 These tools need the project model and always use the managed, indexed clangd. They return an error outside a CMake project or while the first configure is running. Positions are 1-based UTF-16, as for `cpp_hover`. Results are capped at 100 entries (300 for a file outline). On first use in a large project the index may still be building; results then end with a note that they may be incomplete. A feature your clangd does not support returns "not supported by this clangd version" with the version it needs.
 
@@ -135,7 +149,7 @@ C/C++ files are formatted with `clang-format` after every `write` or `edit` tool
 
 ### Commands
 
-- `/cpp-setup` — Check and report C/C++ toolchain availability, the navigation features your clangd supports, and your CMake version against the project-model and preset thresholds
+- `/cpp-setup` — Check and report C/C++ toolchain availability, the navigation features your clangd supports, your CMake version against the project-model and preset thresholds, and, per standard, which C++ features the default compiler (`$CXX`, else `c++`) and clangd support
 - `/cpp-preset [name]` — List the CMake configure presets, or switch to one and reconfigure
 
 ### Context Injection
@@ -189,6 +203,7 @@ On macOS, Homebrew's LLVM is keg-only. Add `$(brew --prefix llvm)/bin` to your `
 | Incoming calls (`cpp_calls`) | clangd 12 or newer |
 | Type hierarchy (`cpp_types`) | clangd 16 or newer |
 | Outgoing calls (`cpp_calls`) | clangd 21 or newer |
+| C++ feature lists and the compiler check when clangd is behind | The project model, and a GCC or Clang compiler driver in `compile_commands.json` |
 
 The managed build uses the Ninja generator when `ninja` is installed, otherwise Unix Makefiles, unless the preset names a single-configuration generator. An existing managed build directory keeps the generator it was created with.
 
