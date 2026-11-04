@@ -8,7 +8,7 @@ import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
 import type { CompilationEntry } from "../extensions/lib/compdb.ts";
 import type { Exec } from "../extensions/lib/project/configure.ts";
 import type { ProjectModel, ProjectTarget } from "../extensions/lib/project/model.ts";
-import { catalogStandard, measureClangd, measureCompiler, parseMacros, presentFeatures, probeSource, ToolchainService, type ToolchainProject } from "../extensions/lib/toolchain.ts";
+import { catalogStandard, measureClangd, measureCompiler, parseMacros, presentFeatures, probeSource, setupFeatureLines, ToolchainService, type ToolchainProject } from "../extensions/lib/toolchain.ts";
 
 const mockClangd = resolve("tests/fixtures/mock-clangd.mjs");
 const mock = (...features: string[]) => ({ command: process.execPath, args: [mockClangd, `--mock-features=${features.join(",")}`], timeoutMs: 2000 });
@@ -306,3 +306,53 @@ test("a file belongs to the gap profile of its owner, and an unowned header to t
 
 // Keep the fixture reader used so a broken mock fails loudly rather than skipping.
 assert.ok(readFileSync(mockClangd, "utf8").includes("--mock-features="));
+
+// ---------------------------------------------------------------------------
+// /cpp-setup
+
+/** Runs `body` with $CXX set to `value`, or unset for undefined. */
+async function withCxx<T>(value: string | undefined, body: () => Promise<T>): Promise<T> {
+  const saved = process.env.CXX;
+  if (value === undefined) delete process.env.CXX;
+  else process.env.CXX = value;
+  try {
+    return await body();
+  } finally {
+    if (saved === undefined) delete process.env.CXX;
+    else process.env.CXX = saved;
+  }
+}
+
+/** A shell that finds `present` commands, then the fake compiler for everything else. */
+function onPath(present: string[], compiler: Exec): Exec {
+  return async (command, args, options) => command === "sh"
+    ? { stdout: "", stderr: "", code: present.includes(args.at(-1)!) ? 0 : 1, killed: false }
+    : compiler(command, args, options);
+}
+
+test("/cpp-setup lists the default compiler's and clangd's features side by side", async () => {
+  const { exec, calls } = fakeCompiler(extra => ({ stdout: extra.includes("-freflection") ? GCC16_REFLECTION : GCC16 }));
+  const lines = await withCxx(undefined, () => setupFeatureLines(onPath(["c++"], exec), { clangd: mock("pack_indexing", "placeholder_variables", "trivial_relocatability"), clangdTimeoutMs: 2000 }));
+  assert.equal(calls[0]!.command, "c++");
+  assert.deepEqual(calls[0]!.args.slice(0, 1), ["-std=c++26"]);
+  assert.equal(lines[0], "✓ C++ compiler: c++ 16 (gcc), measured with -std=c++26");
+  const cxx26 = lines.find(line => line.startsWith("  C++26: "));
+  assert.ok(cxx26, lines.join("\n"));
+  assert.match(cxx26, /both: pack indexing, the _ placeholder;/);
+  assert.match(cxx26, /compiler only: contracts, #embed,/);
+  assert.match(cxx26, /clangd only: trivial relocatability;/);
+  assert.match(cxx26, /compiler needs `-freflection`: static reflection, <meta>;/);
+  assert.match(cxx26, /neither: .*std::hive/);
+});
+
+test("/cpp-setup measures $CXX, and says so when the compiler is not on PATH", async () => {
+  const { exec, calls } = fakeCompiler(() => ({ stdout: CLANG23 }));
+  const lines = await withCxx("clang++-23", () => setupFeatureLines(onPath(["clang++-23"], exec), { clangd: mock("embed"), clangdTimeoutMs: 2000 }));
+  assert.equal(calls[0]!.command, "clang++-23");
+  assert.equal(lines[0], "✓ C++ compiler: clang++-23 23 (clang), measured with -std=c++26");
+
+  const missing = await withCxx(undefined, () => setupFeatureLines(onPath([], exec), { clangd: mock("embed", "pack_indexing"), clangdTimeoutMs: 2000 }));
+  assert.equal(missing[0], "✗ C++ compiler: c++ was not found on PATH; set CXX to measure another compiler");
+  // clangd's list still shows.
+  assert.ok(missing.some(line => line.startsWith("  C++26: clangd: pack indexing, #embed;")), missing.join("\n"));
+});

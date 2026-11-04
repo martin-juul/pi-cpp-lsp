@@ -604,3 +604,55 @@ export class ToolchainService {
     this.detach();
   }
 }
+
+// ---------------------------------------------------------------------------
+// /cpp-setup
+
+const SETUP_STANDARD = "c++26";
+const STANDARDS: readonly Feature["standard"][] = [11, 14, 17, 20, 23, 26];
+
+/**
+ * /cpp-setup lines comparing the default C++ compiler (`$CXX`, else `c++`) under `-std=c++26` with
+ * clangd under the same command: per standard, the features both, only one or neither support.
+ */
+export async function setupFeatureLines(exec: Exec, options: Pick<ToolchainServiceOptions, "clangd" | "clangdTimeoutMs"> = {}): Promise<string[]> {
+  const cxx = process.env.CXX || "c++";
+  const entry: CompilationEntry = { file: join(tmpdir(), "pi-cpp-lsp-setup.cpp"), directory: tmpdir(), argv: [cxx, `-std=${SETUP_STANDARD}`] };
+  const lines: string[] = [];
+  // pi.exec reports a missing program only as a failed run, so look it up first.
+  const found = (await exec("sh", ["-c", 'command -v "$1"', "sh", cxx], { timeout: 5000 }).catch(() => undefined))?.code === 0;
+  const compiler = found ? await measureCompiler(entry, exec) : undefined;
+  if (!found) lines.push(`✗ C++ compiler: ${cxx} was not found on PATH; set CXX to measure another compiler`);
+  else if (!compiler!.ok) lines.push(`✗ C++ compiler: ${cxx} could not be measured: ${compiler!.reason.replace(/\s*\n\s*/g, " ")}`);
+  else lines.push(`✓ C++ compiler: ${compiler!.compiler} (${compiler!.family}), measured with -std=${SETUP_STANDARD}`);
+  const clangd = await measureClangd(entry, options.clangd, options.clangdTimeoutMs);
+  if (!clangd.ok) lines.push(`✗ clangd feature probe: ${clangd.reason.replace(/\s*\n\s*/g, " ")}`);
+
+  const ofCompiler = compiler?.ok ? new Set(compiler.available) : undefined;
+  const ofClangd = clangd.ok ? new Set(clangd.available) : undefined;
+  if (!ofCompiler && !ofClangd) return lines;
+  const needsFlag = compiler?.ok ? compiler.needsFlag : {};
+  lines.push(`  C++ features with -std=${SETUP_STANDARD}, ${ofCompiler && ofClangd ? "compiler vs clangd" : ofCompiler ? "compiler" : "clangd"}:`);
+  for (const standard of STANDARDS) {
+    const ids = FEATURES.filter(feature => feature.standard === standard).map(feature => feature.id);
+    const parts: [string, string[]][] = [];
+    if (ofCompiler && ofClangd) {
+      const both = ids.filter(id => ofCompiler.has(id) && ofClangd.has(id));
+      if (both.length === ids.length) {
+        lines.push(`  C++${standard}: all ${ids.length} in both`);
+        continue;
+      }
+      parts.push(["both", both], ["compiler only", ids.filter(id => ofCompiler.has(id) && !ofClangd.has(id))], ["clangd only", ids.filter(id => !ofCompiler.has(id) && ofClangd.has(id))]);
+    } else {
+      const side = (ofCompiler ?? ofClangd)!;
+      parts.push([ofCompiler ? "compiler" : "clangd", ids.filter(id => side.has(id))]);
+    }
+    const flags = new Map<string, string[]>();
+    for (const id of ids) if (needsFlag[id]) flags.set(needsFlag[id]!, [...(flags.get(needsFlag[id]!) ?? []), id]);
+    for (const [flag, flagged] of flags) parts.push([`${ofClangd ? "compiler needs" : "needs"} \`${flag}\``, flagged]);
+    const missing = ids.filter(id => !ofCompiler?.has(id) && !ofClangd?.has(id) && !needsFlag[id]);
+    parts.push([ofCompiler && ofClangd ? "neither" : "not supported", missing]);
+    lines.push(`  C++${standard}: ${parts.filter(([, list]) => list.length > 0).map(([name, list]) => `${name}: ${featureLabels(list)}`).join("; ")}`);
+  }
+  return lines;
+}

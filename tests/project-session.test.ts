@@ -8,6 +8,9 @@ import { fileURLToPath } from "node:url";
 import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../extensions/index.ts";
 import type { Exec } from "../extensions/lib/project/configure.ts";
+import type { FeatureState } from "../extensions/lib/project/briefing.ts";
+import { ProjectService, UPDATE_MESSAGE } from "../extensions/lib/project/session.ts";
+import type { TargetProfile } from "../extensions/lib/toolchain.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, "fixtures", "cmake");
@@ -149,8 +152,9 @@ test("a fresh session on the multi fixture gets the full briefing on its first r
   assert.ok(first.guidelines.some(line => /C\+\+ standard of the target that owns/.test(line)), first.guidelines.join("\n"));
   assert.deepEqual(s.notifications, []);
 
+  // The toolchain feature check may finish in between; then its results are the only news.
   const second = await s.run();
-  assert.equal(second.message, undefined);
+  if (second.message) assert.match(second.message.content, /^\[cpp-lsp\] C\+\+ feature check finished/);
   assert.ok(second.guidelines.some(line => /C\+\+ standard of the target that owns/.test(line)));
 
   await s.emit("session_compact", { reason: "manual", fromExtension: false, willRetry: false });
@@ -165,6 +169,31 @@ test("the briefing names the active preset", { skip: !hasCmake }, async t => {
   const { message } = await s.run();
   assert.equal(message?.customType, "cpp-project-briefing");
   assert.match(message!.content, /Preset: debug/);
+});
+
+test("a briefing sent before the feature check finishes says so, and the next run carries the features once", { skip: !hasCmake }, async t => {
+  freshCache();
+  const state: FeatureState = { measuring: true };
+  const project = new ProjectService({ cwd: copyFixture("multi"), exec: nodeExec, toolchain: () => state });
+  t.after(() => project.dispose());
+  const first = await project.runMessage();
+  assert.equal(first?.customType, "cpp-project-briefing");
+  assert.match(first!.content, /## C\+\+ features\n.*still running/);
+
+  // Still running: nothing to report yet.
+  assert.equal(await project.runMessage(), undefined);
+
+  const profile = (target: string, standard: 14 | 20): TargetProfile => ({
+    target, standard, compiler: "g++ 16", family: "gcc", available: ["lambdas", "generic_lambdas"], needsFlag: {}, clangdLacks: [], gap: false,
+  });
+  state.profiles = [profile("legacy", 14), profile("app", 20)];
+  state.measuring = false;
+  const update = await project.runMessage();
+  assert.equal(update?.customType, UPDATE_MESSAGE);
+  assert.match(update!.content, /^\[cpp-lsp\] C\+\+ feature check finished/);
+  assert.match(update!.content, /^- legacy \(C\+\+14, g\+\+ 16\):$/m);
+  assert.match(update!.content, /^- app \(C\+\+20, g\+\+ 16\):$/m);
+  assert.equal(await project.runMessage(), undefined, "the features arrive once");
 });
 
 test("runs started by the extension's own custom messages are skipped", { skip: !hasCmake }, async t => {

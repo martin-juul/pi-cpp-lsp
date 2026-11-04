@@ -4,6 +4,7 @@ import { renderBriefing, type BriefingInput } from "../extensions/lib/project/br
 import type { ConfigureResult } from "../extensions/lib/project/configure.ts";
 import type { DriftFinding } from "../extensions/lib/project/drift.ts";
 import type { ProjectModel, ProjectTarget, TargetKind } from "../extensions/lib/project/model.ts";
+import { FEATURES, type TargetProfile } from "../extensions/lib/toolchain.ts";
 
 const root = "/work/proj";
 
@@ -94,4 +95,83 @@ test("a failed configure briefing shows CMake's error and says which model is in
   const stale = renderBriefing(base({ status: "failed", result: failed }));
   assert.match(stale, /last successful configure/i);
   assert.match(stale, /\| legacy \| library/);
+});
+
+// ---------------------------------------------------------------------------
+// C++ features
+
+const upTo = (standard: number) => FEATURES.filter(feature => feature.standard <= standard).map(feature => feature.id);
+
+/** GCC 16 on a C++26 target without -freflection, next to a clangd that lacks contracts and #embed. */
+function gcc16(name: string, fields: Partial<TargetProfile> = {}): TargetProfile {
+  return {
+    target: name, standard: 26, compiler: "g++ 16", family: "gcc",
+    available: upTo(26).filter(id => !["reflection", "meta", "hive", "trivial_relocatability"].includes(id)),
+    needsFlag: { reflection: "-freflection", meta: "-freflection" }, clangdLacks: ["contracts", "embed"], gap: true, ...fields,
+  };
+}
+
+const cxx26 = (...names: string[]) => model(names.map(name => target(name, "library", [`src/${name}`], { standard: "26" })));
+
+test("a GCC 16 target without -freflection lists reflection as needing the flag and contracts as available", () => {
+  const text = renderBriefing(base({ model: cxx26("core"), features: { profiles: [gcc16("core")], measuring: false } }));
+  assert.ok(text.length <= 4000, `briefing is ${text.length} chars`);
+  const lines = text.split("\n");
+  assert.ok(lines.includes("## C++ features"), text);
+  assert.ok(lines.includes("- core (C++26, g++ 16):"), text);
+  assert.ok(lines.includes("  - Needs `-freflection`: static reflection, <meta>"), text);
+  assert.ok(lines.includes("  - clangd lacks: contracts, #embed"), text);
+  const cxx26Line = lines.find(line => line.startsWith("  - C++26: "));
+  assert.ok(cxx26Line?.includes("contracts") && cxx26Line.includes("pack indexing"), text);
+  assert.ok(!cxx26Line.includes("static reflection") && !cxx26Line.includes("std::hive"), cxx26Line);
+  // Every available feature of the older standards is listed too.
+  const cxx11Line = lines.find(line => line.startsWith("  - C++11: "));
+  assert.ok(cxx11Line?.includes("rvalue references") && cxx11Line.includes("thread-safe static initialization"), text);
+});
+
+test("targets with the same profile share one line, and a measurement error is shown", () => {
+  const text = renderBriefing(base({
+    model: cxx26("app", "core", "tool"),
+    features: { measuring: false, profiles: [
+      gcc16("app"), gcc16("core"),
+      { target: "tool", standard: 26, available: [], needsFlag: {}, clangdLacks: [], gap: false, error: "c++ could not run the feature probe: cc1plus: error: bad flag" },
+    ] },
+  }));
+  assert.match(text, /^- app, core \(C\+\+26, g\+\+ 16\):$/m);
+  assert.match(text, /^- tool \(C\+\+26\): the build compiler could not be measured: c\+\+ could not run the feature probe: cc1plus: error: bad flag$/m);
+});
+
+test("without measured targets there is no feature section", () => {
+  assert.doesNotMatch(renderBriefing(base()), /C\+\+ features/);
+  assert.doesNotMatch(renderBriefing(base({ features: { profiles: [], measuring: false } })), /C\+\+ features/);
+  // A check running for a model with no target on C++11 or newer will find nothing to report.
+  const old = model([target("legacy", "library", ["libs/legacy"], { standard: "98" }), target("tests", "test", ["tests"])]);
+  assert.doesNotMatch(renderBriefing(base({ model: old, features: { measuring: true } })), /C\+\+ features|feature check/);
+});
+
+test("a briefing rendered before the first measurement says the feature check is running", () => {
+  const text = renderBriefing(base({ features: { measuring: true } }));
+  assert.match(text, /## C\+\+ features\n.*still running.*later update/);
+});
+
+test("ten measured targets in three distinct profiles stay within the budget, summarized per group", () => {
+  const names = Array.from({ length: 10 }, (_, i) => `component_${i}`);
+  const profiles = names.map((name, i) => i < 4 ? gcc16(name)
+    : i < 7 ? gcc16(name, { needsFlag: {}, available: upTo(26).filter(id => id !== "hive") })
+    : { target: name, standard: 20 as const, compiler: "clang++ 21", family: "clang" as const, available: upTo(20), needsFlag: {}, clangdLacks: [], gap: false });
+  const text = renderBriefing(base({ model: cxx26(...names), features: { profiles, measuring: false } }));
+  assert.ok(text.length <= 4000, `briefing is ${text.length} chars`);
+  assert.match(text, /\| component_9 \| library \|/, "the targets table stays");
+  assert.match(text, /cpp_project overview/);
+  assert.match(text, /^- component_0, component_1, component_2, component_3 \(C\+\+26, g\+\+ 16\): \d+ of \d+ listed features available; needs `-freflection`: static reflection, <meta>; clangd lacks: contracts, #embed\.$/m);
+  assert.match(text, /^- component_7, component_8, component_9 \(C\+\+20, clang\+\+ 21\): all \d+ listed features available\.$/m);
+
+  // Among sixty targets the briefing takes the summary form, and the groups still fit.
+  const many = Array.from({ length: 60 }, (_, i) => target(`component_${i}`, "library",
+    [`src/components/component_${i}/detail`, `src/components/component_${i}/impl`], { standard: i < 10 ? "26" : "98", deps: i ? [`component_${i - 1}`] : [] }));
+  const summary = renderBriefing(base({ model: model(many), findings, features: { profiles, measuring: false } }));
+  assert.ok(summary.length <= 4000, `summary is ${summary.length} chars`);
+  assert.doesNotMatch(summary, /\| Target \|/);
+  assert.match(summary, /cpp_project overview/);
+  assert.equal(summary.split("\n").filter(line => /^- component_\d.*listed features available/.test(line)).length, 3, summary);
 });

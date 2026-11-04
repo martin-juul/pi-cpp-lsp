@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
-import extension from "../extensions/index.ts";
+import extension, { type ExtensionOptions } from "../extensions/index.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 test("extension registers the complete tool set, the project session lifecycle and report points", () => {
@@ -25,7 +26,11 @@ test("extension registers the complete tool set, the project session lifecycle a
 });
 
 /** Runs /cpp-setup against canned tool versions; a tool missing from `versions` is not installed. */
-async function cppSetup(versions: Record<string, string>): Promise<string> {
+const mockClangd = resolve("tests/fixtures/mock-clangd.mjs");
+/** The feature probes use the mock clangd, so /cpp-setup tests never start a real one. */
+const mockToolchain = (...features: string[]) => ({ clangd: { command: process.execPath, args: [mockClangd, `--mock-features=${features.join(",")}`], timeoutMs: 2000 }, clangdTimeoutMs: 2000 });
+
+async function cppSetup(versions: Record<string, string>, options: ExtensionOptions = { toolchain: mockToolchain() }): Promise<string> {
   const commands = new Map<string, any>();
   const notes: string[] = [];
   const exec = async (command: string, args: string[]) => {
@@ -37,7 +42,7 @@ async function cppSetup(versions: Record<string, string>): Promise<string> {
   extension({
     registerTool() {}, on() {}, exec,
     registerCommand(name: string, command: any) { commands.set(name, command); },
-  } as unknown as ExtensionAPI);
+  } as unknown as ExtensionAPI, options);
   await commands.get("cpp-setup").handler("", { ui: { notify: (message: string) => notes.push(message) } });
   return notes.join("\n");
 }
@@ -65,4 +70,11 @@ test("/cpp-setup reports a CMake too old for the project model and a clangd with
   assert.match(report, /✓ outgoing calls/);
   assert.match(report, /✗ project model: needs CMake 3\.14 or newer/);
   assert.match(report, /✓ ninja: 1\.12\.1/);
+});
+
+test("/cpp-setup compares the default compiler's and clangd's C++ features", async () => {
+  const report = await cppSetup({ clangd: "clangd version 21.1.8\n" }, { toolchain: mockToolchain("pack_indexing") });
+  // The fake exec answers `sh -c 'command -v ...'` with 127, so c++ counts as not on PATH.
+  assert.match(report, /✗ C\+\+ compiler: c\+\+ was not found on PATH/);
+  assert.match(report, /C\+\+26: clangd: pack indexing/);
 });

@@ -18,7 +18,7 @@ import { registerNavigationTools } from "./lib/navigation.ts";
 import { registerRenameTool } from "./lib/rename.ts";
 import { postEditNote, resolveToolPath, type PostEditOptions } from "./lib/diagnostics.ts";
 import { isSupportedCmake, probeCmake, supportsPresets, type CmakeVersion, type Exec } from "./lib/project/configure.ts";
-import { ToolchainService, type ToolchainServiceOptions } from "./lib/toolchain.ts";
+import { setupFeatureLines, ToolchainService, type ToolchainServiceOptions } from "./lib/toolchain.ts";
 import { clangToolsGapNote } from "./lib/gap-notes.ts";
 
 const FIXED_GUIDELINES = [
@@ -111,6 +111,8 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
       waitMs: options.project?.waitMs,
       // Configuring runs the repository's CMake code: only in projects pi trusts.
       trusted: ctx.isProjectTrusted(),
+      // The briefing lists each measured target's C++ features.
+      toolchain: () => toolchain,
     });
     toolchain.attach(project);
   });
@@ -203,6 +205,9 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
           results.push(`✗ ${tool.name}: not found — install with: ${tool.install}`);
         }
       }
+
+      // Which C++ features the default compiler and clangd support, side by side.
+      results.push(...await setupFeatureLines(exec, options.toolchain));
 
       ctx.ui.notify(results.join("\n"), "info");
     },
