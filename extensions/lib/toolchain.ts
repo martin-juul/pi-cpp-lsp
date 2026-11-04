@@ -1,10 +1,11 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, extname, join } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { ClangdConnection, type ClangdOptions } from "./clangd.ts";
 import { loadCompilationDatabase, probeInvocation, type CompilationEntry } from "./compdb.ts";
 import type { Exec } from "./project/configure.ts";
-import { bestRealPath, isWithin, ownersOf, type ProjectModel } from "./project/model.ts";
+import { oneLine } from "./output.ts";
+import { bestRealPath, isWithin, ownersOf, standardRank, type ProjectModel } from "./project/model.ts";
 
 /** A C++11-to-C++26 feature the toolchain can be asked about. */
 export interface Feature {
@@ -25,6 +26,9 @@ export interface Feature {
 }
 
 export type Family = "gcc" | "clang" | "unknown";
+
+/** The standards the catalog covers, oldest first. */
+export const STANDARDS: readonly Feature["standard"][] = [11, 14, 17, 20, 23, 26];
 
 const REFLECTION_FLAGS = { gcc: "-freflection" };
 // GCC offers modules only with -fmodules, and defines __cpp_modules as 201810, clang as 1.
@@ -190,6 +194,7 @@ export function featureLabels(ids: Iterable<string>): string {
 }
 
 const PROBE_MARKER = "pi-cpp-lsp-feature:";
+const MARKER_PATTERN = new RegExp(`${PROBE_MARKER}(\\w+)`);
 const ALTERNATIVE_PREFIX = "PI_CPP_LSP_ALT_";
 const PROBE_TIMEOUT_MS = 10_000;
 /** clangd builds the probe's preamble (<version>) on first open. */
@@ -269,13 +274,18 @@ async function withProbe<T>(source: string, body: (dir: string, probe: string) =
  * Which listed features the entry's compiler supports with the entry's own flags, and which
  * ones it supports only behind an extra flag.
  */
-export async function measureCompiler(entry: CompilationEntry, exec: Exec, signal?: AbortSignal): Promise<CompilerMeasurement> {
-  let invocation: ReturnType<typeof probeInvocation>;
+/** The entry's probe invocation, or why it cannot run (a wrapper or an unsupported flag). */
+function probeFor(entry: CompilationEntry): ReturnType<typeof probeInvocation> | { reason: string } {
   try {
-    invocation = probeInvocation(entry);
+    return probeInvocation(entry);
   } catch (error) {
-    return { ok: false, reason: (error as Error).message };
+    return { reason: (error as Error).message };
   }
+}
+
+export async function measureCompiler(entry: CompilationEntry, exec: Exec, signal?: AbortSignal): Promise<CompilerMeasurement> {
+  const invocation = probeFor(entry);
+  if ("reason" in invocation) return { ok: false, reason: invocation.reason };
   const { compiler, args, cwd } = invocation;
   return withProbe(probeSource(false), async (_dir, probe) => {
     const dump = async (extra: string[]) => {
@@ -297,13 +307,13 @@ export async function measureCompiler(entry: CompilationEntry, exec: Exec, signa
       const flag = feature.enable?.[family];
       if (flag && !present.has(feature.id)) gated.set(flag, [...(gated.get(flag) ?? []), feature.id]);
     }
-    for (const [flag, ids] of gated) {
+    await Promise.all([...gated].map(async ([flag, ids]) => {
       // A failing second probe means the compiler lacks the flag, as GCC 15 lacks -freflection.
       const second = await dump([flag]);
-      if (!second.ok) continue;
+      if (!second.ok) return;
       const withFlag = presentFeatures(second.macros);
       for (const id of ids) if (withFlag.has(id)) needsFlag[id] = flag;
-    }
+    }));
     return { ok: true, compiler: compilerName(compiler, family, first.macros), family, available: sortFeatures(present), needsFlag };
   });
 }
@@ -321,12 +331,8 @@ function silencesWarnings(arg: string): boolean {
  * comes back as a `#warning`.
  */
 export async function measureClangd(entry: CompilationEntry, options: ClangdOptions = {}, timeoutMs = CLANGD_PROBE_TIMEOUT_MS): Promise<ClangdMeasurement> {
-  let invocation: ReturnType<typeof probeInvocation>;
-  try {
-    invocation = probeInvocation(entry);
-  } catch (error) {
-    return { ok: false, reason: (error as Error).message };
-  }
+  const invocation = probeFor(entry);
+  if ("reason" in invocation) return { ok: false, reason: invocation.reason };
   return withProbe(probeSource(true), async (dir, probe) => {
     const args = invocation.args.filter(arg => !silencesWarnings(arg));
     writeFileSync(join(dir, "compile_commands.json"), JSON.stringify([{ directory: invocation.cwd, file: probe, arguments: [invocation.compiler, ...args, probe] }]));
@@ -337,7 +343,7 @@ export async function measureClangd(entry: CompilationEntry, options: ClangdOpti
       if (result.status === "pending") return { ok: false, reason: `clangd did not answer the feature probe within ${Math.round(timeoutMs / 1000)}s` };
       const present = new Set<string>();
       for (const diagnostic of result.diagnostics) {
-        const match = diagnostic.message.match(/pi-cpp-lsp-feature:(\w+)/);
+        const match = diagnostic.message.match(MARKER_PATTERN);
         if (match && featureById.has(match[1]!)) present.add(match[1]!);
       }
       return { ok: true, available: sortFeatures(present) };
@@ -399,11 +405,10 @@ const HEADER_EXTENSIONS = new Set([".h", ".hh", ".hpp", ".hxx", ".h++", ".ipp", 
  * the newest catalog standard not newer than it, or undefined before C++11.
  */
 export function catalogStandard(standard: string | undefined): Feature["standard"] | undefined {
-  const value = Number(standard);
-  if (!Number.isFinite(value)) return undefined;
-  const year = value >= 90 ? 1900 + value : 2000 + value;
-  for (const candidate of [26, 23, 20, 17, 14, 11] as const) if (year >= 2000 + candidate) return candidate;
-  return undefined;
+  if (standard === undefined) return undefined;
+  const year = standardRank(standard);
+  if (!Number.isFinite(year)) return undefined;
+  return [...STANDARDS].reverse().find(candidate => year >= 2000 + candidate);
 }
 
 /** The ids of the catalog features up to `standard`. */
@@ -417,7 +422,8 @@ interface GroupResult {
   clangd?: ClangdMeasurement;
 }
 
-async function mapLimited<T, R>(items: T[], limit: number, body: (item: T) => Promise<R>): Promise<R[]> {
+/** Runs `body` over `items` with at most `limit` at a time; results keep the items' order. */
+export async function mapLimited<T, R>(items: T[], limit: number, body: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -431,12 +437,17 @@ async function mapLimited<T, R>(items: T[], limit: number, body: (item: T) => Pr
 
 const intersect = (sets: string[][]) => sets.length === 0 ? [] : sets.reduce((acc, set) => acc.filter(id => set.includes(id)));
 
+/** The profile of a target whose compiler could not be measured. */
+function unmeasuredProfile(target: string, standard: Feature["standard"], reason: string): TargetProfile {
+  return { target, standard, available: [], needsFlag: {}, clangdLacks: [], gap: false, error: reason };
+}
+
 function targetProfile(target: string, standard: Feature["standard"], groups: GroupResult[]): TargetProfile {
   const listed = featuresUpTo(standard);
   const measured = groups.filter((group): group is GroupResult & { compiler: Extract<CompilerMeasurement, { ok: true }> } => group.compiler.ok);
   if (measured.length === 0) {
     const reason = groups.map(group => !group.compiler.ok ? group.compiler.reason : "").find(Boolean) ?? "no C++ source has a compilation database entry";
-    return { target, standard, available: [], needsFlag: {}, clangdLacks: [], gap: false, error: reason };
+    return unmeasuredProfile(target, standard, reason);
   }
   const available = intersect(measured.map(group => group.compiler.available)).filter(id => listed.has(id));
   const needsFlag: Record<string, string> = {};
@@ -554,23 +565,26 @@ export class ToolchainService {
       entries = loadCompilationDatabase(compileDatabase);
     } catch (error) {
       const reason = (error as Error).message;
-      return targets.map(target => ({ target: target.name, standard: catalogStandard(target.cxxStandard)!, available: [], needsFlag: {}, clangdLacks: [], gap: false, error: reason }));
+      return targets.map(target => unmeasuredProfile(target.name, catalogStandard(target.cxxStandard)!, reason));
     }
     // One measurement per distinct compiler and flags.
     const groups = new Map<string, CompilationEntry>();
     const targetGroups = new Map<string, string[]>();
+    // Sources of one target usually share a command that differs only in the source path, so the
+    // probe invocation (a realpath per argument) is worked out once per such command.
+    const keyByCommand = new Map<string, string>();
     for (const target of targets) {
       const keys = new Set<string>();
       for (const source of target.sources) {
         if (source.language !== "CXX" || source.isGenerated) continue;
         const entry = entries.get(source.path);
         if (!entry) continue;
-        let key: string;
-        try {
-          const { compiler, args, cwd } = probeInvocation(entry);
-          key = JSON.stringify([compiler, args, cwd]);
-        } catch (error) {
-          key = JSON.stringify(["error", (error as Error).message]);
+        const command = JSON.stringify([entry.directory, entry.argv.map(arg => resolve(entry.directory, arg) === entry.file ? "" : arg)]);
+        let key = keyByCommand.get(command);
+        if (key === undefined) {
+          const invocation = probeFor(entry);
+          key = "reason" in invocation ? JSON.stringify(["error", invocation.reason]) : JSON.stringify([invocation.compiler, invocation.args, invocation.cwd]);
+          keyByCommand.set(command, key);
         }
         keys.add(key);
         if (!groups.has(key)) groups.set(key, entry);
@@ -609,7 +623,7 @@ export class ToolchainService {
 // /cpp-setup
 
 const SETUP_STANDARD = "c++26";
-const STANDARDS: readonly Feature["standard"][] = [11, 14, 17, 20, 23, 26];
+
 
 /**
  * /cpp-setup lines comparing the default C++ compiler (`$CXX`, else `c++`) under `-std=c++26` with
@@ -621,12 +635,14 @@ export async function setupFeatureLines(exec: Exec, options: Pick<ToolchainServi
   const lines: string[] = [];
   // pi.exec reports a missing program only as a failed run, so look it up first.
   const found = (await exec("sh", ["-c", 'command -v "$1"', "sh", cxx], { timeout: 5000 }).catch(() => undefined))?.code === 0;
-  const compiler = found ? await measureCompiler(entry, exec) : undefined;
+  const [compiler, clangd] = await Promise.all([
+    found ? measureCompiler(entry, exec) : undefined,
+    measureClangd(entry, options.clangd, options.clangdTimeoutMs),
+  ]);
   if (!found) lines.push(`✗ C++ compiler: ${cxx} was not found on PATH; set CXX to measure another compiler`);
-  else if (!compiler!.ok) lines.push(`✗ C++ compiler: ${cxx} could not be measured: ${compiler!.reason.replace(/\s*\n\s*/g, " ")}`);
+  else if (!compiler!.ok) lines.push(`✗ C++ compiler: ${cxx} could not be measured: ${oneLine(compiler!.reason)}`);
   else lines.push(`✓ C++ compiler: ${compiler!.compiler} (${compiler!.family}), measured with -std=${SETUP_STANDARD}`);
-  const clangd = await measureClangd(entry, options.clangd, options.clangdTimeoutMs);
-  if (!clangd.ok) lines.push(`✗ clangd feature probe: ${clangd.reason.replace(/\s*\n\s*/g, " ")}`);
+  if (!clangd.ok) lines.push(`✗ clangd feature probe: ${oneLine(clangd.reason)}`);
 
   const ofCompiler = compiler?.ok ? new Set(compiler.available) : undefined;
   const ofClangd = clangd.ok ? new Set(clangd.available) : undefined;

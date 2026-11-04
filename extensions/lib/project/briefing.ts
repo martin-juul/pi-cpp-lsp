@@ -1,9 +1,9 @@
 import { dirname, isAbsolute, relative } from "node:path";
 import type { ConfigureResult } from "./configure.ts";
 import type { DriftFinding, ReferencedSource } from "./drift.ts";
-import { plural } from "../output.ts";
+import { oneLine, plural } from "../output.ts";
 import { formatStandard, ownersOf, type ProjectModel, type ProjectTarget } from "./model.ts";
-import { catalogStandard, featureLabels, FEATURES, type Feature, type TargetProfile } from "../toolchain.ts";
+import { catalogStandard, featureLabels, FEATURES, STANDARDS, type Feature, type TargetProfile } from "../toolchain.ts";
 
 /** The briefing stays within this many characters (R7); larger projects get the summary form. */
 export const BRIEFING_BUDGET = 4_000;
@@ -94,7 +94,6 @@ export function describeResolved(finding: DriftFinding, root: string, model: Pro
 // ---------------------------------------------------------------------------
 // C++ features
 
-const STANDARDS: readonly Feature["standard"][] = [11, 14, 17, 20, 23, 26];
 const FEATURES_INTRO = "What each target's build compiler accepts with the target's own flags, for the features of its standard and older ones. clangd may report false errors in code that uses a feature it lacks; the build compiler decides.";
 const FEATURE_CHECK_RUNNING = "The check of which C++ features each target's build compiler and clangd support is still running; its results follow in a later update.";
 /** Share of the summary budget the feature groups may take. */
@@ -108,7 +107,6 @@ export function featureCheckRunning(features: FeatureState | undefined, model: P
     && !!model?.targets.some(target => target.isProjectTarget && catalogStandard(target.cxxStandard) !== undefined);
 }
 
-const oneLine = (text: string) => text.replace(/\s*\n\s*/g, " ");
 const capped = (text: string, chars: number) => text.length > chars ? `${text.slice(0, chars - 3)}...` : text;
 
 /** Targets with identical results, in first-seen order. */

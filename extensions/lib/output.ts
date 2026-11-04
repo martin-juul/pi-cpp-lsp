@@ -5,6 +5,11 @@ import { join } from "node:path";
 const MAX_OUTPUT_BYTES = 40_000;
 const MAX_OUTPUT_LINES = 1_000;
 
+/** `text` with its line breaks, and the whitespace around them, collapsed to single spaces. */
+export function oneLine(text: string): string {
+  return text.replace(/\s*\n\s*/g, " ");
+}
+
 /** "1 file", "2 files". */
 export function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? "" : "s"}`;

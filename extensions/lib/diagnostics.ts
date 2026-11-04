@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { extname, isAbsolute, relative, resolve } from "node:path";
 import type { ClangdConnection, Diagnostic } from "./clangd.ts";
-import { probeInvocation, resolveCompileInvocation } from "./compdb.ts";
+import { probeInvocation, resolveCompileInvocation, type CompilationEntry } from "./compdb.ts";
 import { plural } from "./output.ts";
 import type { Exec } from "./project/configure.ts";
 import type { ProjectService } from "./project/session.ts";
@@ -182,6 +182,8 @@ export interface CompilerCheckOptions {
   buildDir?: string;
   /** Defaults to COMPILER_CHECK_TIMEOUT_MS. */
   timeoutMs?: number;
+  /** The compilation database already loaded, by canonical source path, for checking many files. */
+  entries?: Map<string, CompilationEntry>;
 }
 
 export type CompilerCheck = { ok: true; problems: CompilerProblem[] } | { ok: false; reason: string };
@@ -203,6 +205,11 @@ function compilerInvocation(file: string, profile: TargetProfile, options: Compi
     if (!profile.entry) throw new Error(`target ${profile.target} has no compile command to borrow for a header`);
     const { compiler, args, cwd } = probeInvocation(profile.entry);
     return { compiler, args: [...args, "-x", "c++", "-Wno-pragma-once-outside-header", ...plain, "-fsyntax-only", file], cwd };
+  }
+  const entry = options.entries?.get(file);
+  if (entry) {
+    const { compiler, args, cwd } = probeInvocation(entry);
+    return { compiler, args: [...args, file, "-fsyntax-only", ...plain], cwd };
   }
   const { compiler, args, cwd } = resolveCompileInvocation(options.cwd, { file, build_dir: options.buildDir });
   return { compiler, args: [...args, ...plain], cwd };

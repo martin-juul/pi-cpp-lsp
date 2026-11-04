@@ -147,7 +147,7 @@ function normalizeStandard(value: string): string {
 }
 
 // 98 predates 11; later standards order by number.
-const standardRank = (standard: string) => {
+export const standardRank = (standard: string) => {
   const year = Number(standard);
   return Number.isFinite(year) ? (year >= 90 ? 1900 + year : 2000 + year) : Number.POSITIVE_INFINITY;
 };

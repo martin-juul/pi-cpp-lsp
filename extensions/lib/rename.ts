@@ -11,10 +11,11 @@ import {
 } from "./diagnostics.ts";
 import { plural } from "./output.ts";
 import type { Exec } from "./project/configure.ts";
-import { bestRealPath, isInSkippedDir, isWithin, ownersOf, type ProjectModel } from "./project/model.ts";
+import { loadCompilationDatabase, type CompilationEntry } from "./compdb.ts";
+import { bestRealPath, findTarget, isInSkippedDir, isWithin, ownersOf, type ProjectModel } from "./project/model.ts";
 import { projectCacheDir } from "./project/root.ts";
 import type { ProjectService } from "./project/session.ts";
-import type { TargetProfile, ToolchainService } from "./toolchain.ts";
+import { mapLimited, type TargetProfile, type ToolchainService } from "./toolchain.ts";
 
 /** How long a rename waits for clangd's background index to become idle (KTD14 step 2). */
 export const INDEX_WAIT_MS = 30_000;
@@ -55,6 +56,8 @@ interface BuildCheck {
   unchecked: string[];
   /** The gap targets the check covered, in model order. */
   targets: TargetProfile[];
+  /** A checked file has a compiler error. */
+  broken: boolean;
 }
 
 /**
@@ -90,29 +93,28 @@ async function buildCheck(model: ProjectModel, targets: TargetProfile[], changed
   const queued = new Set<string>();
   const add = (file: string, profile: TargetProfile) => { if (!queued.has(file)) { queued.add(file); jobs.push({ file, profile }); } };
   for (const profile of targets) {
-    const target = model.targets.find(candidate => candidate.name === profile.target);
-    for (const source of target?.sources ?? []) if (source.language === "CXX" && !source.isGenerated) add(source.path, profile);
+    for (const source of findTarget(model, profile.target)?.sources ?? []) if (source.language === "CXX" && !source.isGenerated) add(source.path, profile);
   }
   for (const file of changed) {
     const profile = toolchain.gapProfileFor(file);
     if (profile && targets.includes(profile)) add(file, profile);
   }
   const deadline = Date.now() + options.limitMs;
+  // Loaded once: every source would otherwise read and parse the whole database again.
+  let entries: Map<string, CompilationEntry> | undefined;
+  try { entries = loadCompilationDatabase(join(model.buildDir, "compile_commands.json")); } catch { /* each check reports the database error */ }
   const results = new Map<string, CompilerCheck>();
   const unchecked = new Set<string>();
-  let next = 0;
-  await Promise.all(Array.from({ length: Math.min(RENAME_CHECK_CONCURRENCY, jobs.length) }, async () => {
-    while (next < jobs.length) {
-      const { file, profile } = jobs[next++]!;
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) { unchecked.add(profile.target); continue; }
-      const result = await checkWithCompiler(file, profile, { exec: options.exec, cwd: options.cwd, buildDir: model.buildDir, timeoutMs: Math.min(COMPILER_CHECK_TIMEOUT_MS, remaining) });
-      // A compile cut off by the overall limit was not reached; any other failure is the file's verdict.
-      if (!result.ok && Date.now() >= deadline) unchecked.add(profile.target);
-      else results.set(file, result);
-    }
-  }));
-  return { results, unchecked: targets.map(profile => profile.target).filter(name => unchecked.has(name)), targets };
+  await mapLimited(jobs, RENAME_CHECK_CONCURRENCY, async ({ file, profile }) => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) { unchecked.add(profile.target); return; }
+    const result = await checkWithCompiler(file, profile, { exec: options.exec, cwd: options.cwd, buildDir: model.buildDir, entries, timeoutMs: Math.min(COMPILER_CHECK_TIMEOUT_MS, remaining) });
+    // A compile cut off by the overall limit was not reached; any other failure is the file's verdict.
+    if (!result.ok && Date.now() >= deadline) unchecked.add(profile.target);
+    else results.set(file, result);
+  });
+  const broken = [...results.values()].some(result => result.ok && result.problems.some(problem => problem.severity === "error"));
+  return { results, unchecked: targets.map(profile => profile.target).filter(name => unchecked.has(name)), targets, broken };
 }
 
 const sameProblem = (a: CompilerProblem, b: CompilerProblem) => a.file === b.file && a.line === b.line && a.column === b.column && a.message === b.message;
@@ -131,12 +133,10 @@ function changedFileLines(file: string, noteLines: string[], profile: TargetProf
 function buildCheckLines(check: BuildCheck, changed: Set<string>, limitMs: number, cwd: string): string[] {
   const compilers = [...new Set(check.targets.map(profile => profile.compiler ?? "the build compiler"))].join(", ");
   const errors: CompilerProblem[] = [];
-  let broken = false;
   for (const [file, result] of check.results) {
     if (!result.ok) continue;
     for (const problem of result.problems) {
       if (problem.severity !== "error") continue;
-      broken = true;
       if (changed.has(problem.file) && problem.file === file) continue;
       if (!errors.some(seen => sameProblem(seen, problem))) errors.push(problem);
     }
@@ -146,7 +146,7 @@ function buildCheckLines(check: BuildCheck, changed: Set<string>, limitMs: numbe
     lines.push(...renderCompilerProblems(errors.slice(0, MAX_DIAGNOSTICS), cwd).slice(1).map(line => `  ${line}`));
     if (errors.length > MAX_DIAGNOSTICS) lines.push(`  [${errors.length - MAX_DIAGNOSTICS} more errors omitted]`);
   }
-  if (broken) lines.push("  the build may be broken: fix these errors; the rename was not undone");
+  if (check.broken) lines.push("  the build may be broken: fix these errors; the rename was not undone");
   else if (check.unchecked.length === 0) lines.push("  no errors");
   if (check.unchecked.length > 0) lines.push(`  not checked within ${Math.round(limitMs / 100) / 10}s: ${check.unchecked.join(", ")}`);
   return lines;
@@ -325,18 +325,18 @@ export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd
 
       const files = planned.map(entry => entry.file);
       const model = project.model;
-      const gaps = options.toolchain?.gapProfiles ?? [];
-      const targets = model && gaps.length > 0 ? affectedGapTargets(model, files, gaps) : [];
+      const toolchain = options.toolchain;
+      const targets = model && toolchain && toolchain.gapProfiles.length > 0 ? affectedGapTargets(model, files, toolchain.gapProfiles) : [];
       const limitMs = options.renameCheckMs ?? RENAME_CHECK_MS;
-      const check = model && targets.length > 0
-        ? await buildCheck(model, targets, files, options.toolchain!, { exec: options.exec, cwd: ctx.cwd, limitMs })
+      const check = model && toolchain && targets.length > 0
+        ? await buildCheck(model, targets, files, toolchain, { exec: options.exec, cwd: ctx.cwd, limitMs })
         : undefined;
 
       const changed: { file: string; edits: number; note?: string }[] = [];
       const lines = [`Renamed to ${params.new_name} in ${plural(planned.length, "file")}:`];
       for (const entry of planned) {
         let noteLines = notes.get(entry.file)!;
-        const profile = check ? options.toolchain!.gapProfileFor(entry.file) : undefined;
+        const profile = check ? toolchain?.gapProfileFor(entry.file) : undefined;
         if (check && profile && check.targets.includes(profile)) noteLines = changedFileLines(entry.file, noteLines, profile, check.results.get(entry.file), ctx.cwd);
         changed.push({ file: entry.file, edits: entry.edits, note: postEditText(noteLines) });
         lines.push(`${cwdDisplayPath(ctx.cwd, entry.file)}: ${plural(entry.edits, "edit")}`);
@@ -345,8 +345,7 @@ export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd
       if (check) lines.push(...buildCheckLines(check, new Set(files), limitMs, ctx.cwd));
       const drift = await project.reportPoint().catch(() => undefined);
       if (drift) lines.push(drift);
-      const buildBroken = check ? [...check.results.values()].some(result => result.ok && result.problems.some(problem => problem.severity === "error")) : undefined;
-      return { content: [{ type: "text" as const, text: bounded(lines.join("\n")) }], details: { ...base, changed, drift, ...(check ? { buildBroken, unchecked: check.unchecked } : {}) } };
+      return { content: [{ type: "text" as const, text: bounded(lines.join("\n")) }], details: { ...base, changed, drift, ...(check ? { buildBroken: check.broken, unchecked: check.unchecked } : {}) } };
     },
   });
 }
