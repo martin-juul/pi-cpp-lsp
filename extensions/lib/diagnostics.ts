@@ -279,11 +279,19 @@ async function diagnose(file: string, clangd: PostEditClangd, options: PostEditO
 async function verdict(file: string, clangd: { lines: string[]; errors: number }, options: PostEditOptions): Promise<string[]> {
   const profile = clangd.errors > 0 ? options.toolchain?.gapProfileFor(file) : undefined;
   if (!profile) return clangd.lines;
-  const compiler = profile.compiler ?? "the build compiler";
-  const lacking = featureLabels(profile.clangdLacks);
   const check = await checkWithCompiler(file, profile, { exec: options.exec, cwd: options.cwd, buildDir: options.project?.model?.buildDir });
-  if (!check.ok) return [...clangd.lines, `warning: clangd lacks ${lacking}, so errors involving them may be false; ${compiler} could not check the file: ${check.reason}`];
-  return [...renderCompilerProblems(check.problems, options.cwd), `checked by ${compiler}; clangd lacks ${lacking}`];
+  if (!check.ok) return [...clangd.lines, uncheckedWarning(profile, check.reason)];
+  return [...renderCompilerProblems(check.problems, options.cwd), checkedBy(profile)];
+}
+
+/** The line that says the build compiler, not clangd, judged a file. */
+export function checkedBy(profile: TargetProfile): string {
+  return `checked by ${profile.compiler ?? "the build compiler"}; clangd lacks ${featureLabels(profile.clangdLacks)}`;
+}
+
+/** The line kept beside clangd's diagnostics when the build compiler could not judge a file. */
+export function uncheckedWarning(profile: TargetProfile, reason: string): string {
+  return `warning: clangd lacks ${featureLabels(profile.clangdLacks)}, so errors involving them may be false; ${profile.compiler ?? "the build compiler"} could not check the file: ${reason}`;
 }
 
 /**

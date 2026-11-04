@@ -120,7 +120,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
   // Registered after session_start so the managed clangd attaches to the new project at once (KTD11).
   const clangd = registerClangdTools(pi, { getProject: () => project, gapProfileFor: file => toolchain.gapProfileFor(file) });
   registerNavigationTools(pi, clangd, { gaps: () => toolchain.gapProfiles });
-  registerRenameTool(pi, clangd, { exec, getProject: () => project, ...options.diagnostics });
+  registerRenameTool(pi, clangd, { exec, getProject: () => project, toolchain, ...options.diagnostics });
 
   pi.on("session_shutdown", async () => {
     toolchain.close();
