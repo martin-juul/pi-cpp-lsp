@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { findCompilationDatabase, resolveCompileInvocation, splitCommand, syntaxArguments } from "../extensions/lib/compdb.ts";
+import { findCompilationDatabase, loadCompilationDatabase, probeInvocation, resolveCompileInvocation, splitCommand, syntaxArguments } from "../extensions/lib/compdb.ts";
 
 function fixture(t: { after: (fn: () => void) => void }) {
   const root = mkdtempSync(join(tmpdir(), "cpp-compdb-test-"));
@@ -83,6 +83,39 @@ test("artifact flags are removed and unsupported pass-through flags produce erro
   for (const arg of ["-Xclang", "-Wp,-MD,dep.d", "-fmodules", "-ftime-trace", "--analyze"]) {
     assert.throws(() => syntaxArguments([arg]), /Unsupported compiler flag/);
   }
+});
+
+test("CMake module-scanning arguments are stripped instead of rejected", (t) => {
+  // CMake 3.28+ with Ninja adds these to every C++20-or-newer entry (GCC form, then clang's response file).
+  assert.deepEqual(syntaxArguments(["-std=gnu++26", "-fmodules-ts", "-fmodule-mapper=CMakeFiles/a.dir/a.cpp.o.modmap", "-MD", "-fdeps-format=p1689r5", "-x", "c++", "-c", "a.cpp"]),
+    ["-std=gnu++26", "-x", "c++", "a.cpp", "-fsyntax-only"]);
+  assert.deepEqual(syntaxArguments(["-std=c++26", "@CMakeFiles/a.dir/a.cpp.o.modmap", "-fdeps-file=a.ddi", "-fdeps-target=a.o", "a.cpp"]), ["-std=c++26", "a.cpp", "-fsyntax-only"]);
+  assert.throws(() => syntaxArguments(["@flags.rsp"]), /Response files/);
+  assert.throws(() => syntaxArguments(["-fmodules"]), /Unsupported compiler flag/);
+  const root = fixture(t);
+  database(root, { directory: join(root, "build"), file: "../src/a.cpp", command: "/usr/bin/g++ -std=gnu++26 -fmodules-ts -fmodule-mapper=CMakeFiles/a.dir/a.cpp.o.modmap -MD -fdeps-format=p1689r5 -x c++ -o a.o -c ../src/a.cpp" });
+  assert.deepEqual(resolveCompileInvocation(root, { file: "src/a.cpp" }).args, ["-std=gnu++26", "-x", "c++", "../src/a.cpp", "-fsyntax-only"]);
+});
+
+test("a loaded database maps each real source path to its entry, and probe invocations drop the source and outputs", (t) => {
+  const root = fixture(t);
+  writeFileSync(join(root, "src", "a.cpp"), "");
+  writeFileSync(join(root, "src", "b.cpp"), "");
+  writeFileSync(join(root, "build", "compile_commands.json"), JSON.stringify([
+    { directory: join(root, "build"), file: "../src/a.cpp", arguments: ["g++", "-I../include", "-DX=1", "-std=gnu++26", "-freflection", "-MD", "-MF", "a.d", "-o", "a.o", "-c", "../src/a.cpp"] },
+    { directory: root, file: "src/b.cpp", command: "./tools/clang++ -std=c++26 -c src/b.cpp" },
+  ]));
+  const entries = loadCompilationDatabase(join(root, "build", "compile_commands.json"));
+  const a = entries.get(realpathSync(join(root, "src", "a.cpp")));
+  assert.ok(a);
+  assert.equal(a.directory, join(root, "build"));
+  const probe = probeInvocation(a);
+  assert.equal(probe.compiler, "g++");
+  assert.equal(probe.cwd, join(root, "build"));
+  assert.deepEqual(probe.args, ["-I../include", "-DX=1", "-std=gnu++26", "-freflection"]);
+  // A relative compiler path resolves against the entry's directory, as for cpp_compile.
+  assert.equal(probeInvocation(entries.get(realpathSync(join(root, "src", "b.cpp")))!).compiler, join(root, "tools", "clang++"));
+  assert.throws(() => probeInvocation({ ...a, argv: ["ccache", "g++", "../src/a.cpp"] }), /Unsupported compiler/);
 });
 
 test("real compiler uses database defines/includes/cwd and emits neither object nor dependency files", (t) => {

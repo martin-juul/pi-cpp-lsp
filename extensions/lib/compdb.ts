@@ -85,11 +85,21 @@ function checkCompiler(compiler: string): void {
   }
 }
 
+/**
+ * CMake's C++20 module-dependency scanning (CMake 3.28+ with Ninja) adds these to every entry of a
+ * C++20-or-newer target: GCC gets the -fmodules-ts/-fmodule-mapper/-fdeps-* flags and clang a
+ * `@<object>.modmap` response file. They are dropped; a source that really imports modules still fails.
+ */
+function isModuleScanArgument(arg: string): boolean {
+  return arg === "-fmodules-ts" || /^-fmodule-mapper=/.test(arg) || /^-fdeps-(?:format|file|target)=/.test(arg) || (arg.startsWith("@") && arg.endsWith(".modmap"));
+}
+
 export function syntaxArguments(args: string[], standard?: string): string[] {
   const result: string[] = [];
   const takesOutput = new Set(["-o", "--output", "-MF", "-MT", "-MQ", "-MJ", "-dependency-file", "--serialize-diagnostics", "-serialize-diagnostics"]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (isModuleScanArgument(arg)) continue;
     if (arg.startsWith("@")) throw new Error("Response files are unsupported for syntax checks; expand them in compile_commands.json");
     if (arg === "--") throw new Error("The compiler '--' delimiter is unsupported for syntax checks");
     if (takesOutput.has(arg)) {
@@ -113,29 +123,82 @@ export function syntaxArguments(args: string[], standard?: string): string[] {
   return result;
 }
 
+function readEntries(database: string): any[] {
+  let entries: unknown;
+  try { entries = JSON.parse(readFileSync(database, "utf8")); }
+  catch (err) { throw new Error(`Cannot read compilation database ${database}: ${(err as Error).message}`); }
+  if (!Array.isArray(entries)) throw new Error(`Compilation database must contain an array: ${database}`);
+  return entries;
+}
+
+function isEntry(value: any): boolean {
+  return value && typeof value.file === "string" && typeof value.directory === "string";
+}
+
+function entryArgv(entry: any): string[] {
+  if (entry.arguments !== undefined) {
+    if (!Array.isArray(entry.arguments) || entry.arguments.length === 0 || !entry.arguments.every((arg: unknown) => typeof arg === "string")) throw new Error("Compilation entry arguments must be a nonempty string array");
+    return entry.arguments;
+  }
+  if (typeof entry.command === "string") return splitCommand(entry.command);
+  throw new Error("Compilation entry requires arguments or command");
+}
+
+/** One compilation database entry with its paths resolved. */
+export interface CompilationEntry {
+  /** Canonical (real) path of the source. */
+  file: string;
+  /** Absolute working directory of the command. */
+  directory: string;
+  argv: string[];
+}
+
+/** Every usable entry of `database`, keyed by the source's canonical path; the first entry for a file wins. */
+export function loadCompilationDatabase(database: string): Map<string, CompilationEntry> {
+  const result = new Map<string, CompilationEntry>();
+  for (const value of readEntries(database)) {
+    if (!isEntry(value)) continue;
+    let argv: string[];
+    try { argv = entryArgv(value); } catch { continue; }
+    const directory = resolve(dirname(database), value.directory);
+    const file = canonical(resolve(directory, value.file));
+    if (!result.has(file)) result.set(file, { file, directory, argv });
+  }
+  return result;
+}
+
+/** The compiler driver of an entry, resolved against its directory when it is a relative path. */
+function entryCompiler(compiler: string, directory: string): string {
+  return compiler.includes("/") && !isAbsolute(compiler) ? resolve(directory, compiler) : compiler;
+}
+
+/**
+ * The entry's compiler and flags without the source file, output and dependency-file flags, for
+ * running the same compilation on another input (a probe). Throws like cpp_compile for wrappers and
+ * unsupported flags.
+ */
+export function probeInvocation(entry: CompilationEntry): { compiler: string; args: string[]; cwd: string } {
+  checkCompiler(entry.argv[0] ?? "");
+  const args = syntaxArguments(entry.argv.slice(1))
+    .filter(arg => arg !== "-fsyntax-only" && canonical(resolve(entry.directory, arg)) !== entry.file);
+  return { compiler: entryCompiler(entry.argv[0]!, entry.directory), args, cwd: entry.directory };
+}
+
 export function resolveCompileInvocation(cwd: string, options: CompileOptions): CompileInvocation {
   const file = resolve(cwd, options.file);
   const database = findCompilationDatabase(cwd, file, options.build_dir);
   if (database) {
-    let entries: unknown;
-    try { entries = JSON.parse(readFileSync(database, "utf8")); }
-    catch (err) { throw new Error(`Cannot read compilation database ${database}: ${(err as Error).message}`); }
-    if (!Array.isArray(entries)) throw new Error(`Compilation database must contain an array: ${database}`);
-    const entry = entries.find((value) => value && typeof value.file === "string" && typeof value.directory === "string" && canonical(resolve(dirname(database), value.directory, value.file)) === canonical(file));
+    const entries = readEntries(database);
+    const entry = entries.find((value) => isEntry(value) && canonical(resolve(dirname(database), value.directory, value.file)) === canonical(file));
     if (!entry) throw new Error(`No compilation database entry for ${file} in ${database}; select the correct build_dir or add this file to the build`);
     const directory = resolve(dirname(database), entry.directory);
-    let argv: string[];
-    if (entry.arguments !== undefined) {
-      if (!Array.isArray(entry.arguments) || entry.arguments.length === 0 || !entry.arguments.every((arg: unknown) => typeof arg === "string")) throw new Error("Compilation entry arguments must be a nonempty string array");
-      argv = entry.arguments;
-    } else if (typeof entry.command === "string") argv = splitCommand(entry.command);
-    else throw new Error("Compilation entry requires arguments or command");
+    const argv = entryArgv(entry);
     const compiler = options.compiler ?? argv[0];
     if (!compiler) throw new Error("Compilation command is empty");
     // An override cannot safely unwrap a launcher or environment-assignment prefix.
     checkCompiler(argv[0]);
     checkCompiler(compiler);
-    const driver = compiler.includes("/") && !isAbsolute(compiler) ? resolve(directory, compiler) : compiler;
+    const driver = entryCompiler(compiler, directory);
     return { compiler: driver, args: syntaxArguments(argv.slice(1), options.standard), cwd: directory, file, database };
   }
   const isC = extname(file) === ".c";

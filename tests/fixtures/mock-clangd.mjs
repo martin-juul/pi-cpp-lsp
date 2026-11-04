@@ -24,8 +24,28 @@ function send(message) {
 // File markers drive the extra protocol paths: DIAG reports one error,
 // INDEX-BEGIN creates the background-index progress token and begins it,
 // INDEX-END ends it.
+// A feature probe (pi-cpp-lsp-feature markers) gets one #warning per feature named by
+// --mock-features=a,b, like clangd does for the features it supports. Like clang, -w in the
+// probe's compile command silences them and -Werror makes them errors.
+const mockFeatures = (process.argv.find(arg => arg.startsWith('--mock-features='))?.slice('--mock-features='.length) ?? '').split(',').filter(Boolean);
+function probeCommand(uri) {
+  try {
+    const dir = buildDir?.slice('--compile-commands-dir='.length);
+    const entries = JSON.parse(readFileSync(`${dir}/compile_commands.json`, 'utf8'));
+    return entries.find(entry => `file://${entry.file}` === uri)?.arguments ?? [];
+  } catch { return []; }
+}
+function featureWarnings(doc) {
+  if (!doc.text.includes('pi-cpp-lsp-feature:')) return [];
+  const args = probeCommand(doc.uri);
+  if (args.includes('-w')) return [];
+  const severity = args.some(arg => arg.startsWith('-Werror')) ? 1 : 2;
+  return mockFeatures.filter(id => doc.text.includes(`"pi-cpp-lsp-feature:${id}"`))
+    .map(id => ({ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity, message: `pi-cpp-lsp-feature:${id}` }));
+}
 function opened(doc) {
-  send({ method: 'textDocument/publishDiagnostics', params: { uri: doc.uri, version: doc.version, diagnostics: doc.text.includes('DIAG') ? [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } }, severity: 1, message: `mock error version ${doc.version}` }] : [] } });
+  const diagnostics = doc.text.includes('DIAG') ? [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } }, severity: 1, message: `mock error version ${doc.version}` }] : [];
+  send({ method: 'textDocument/publishDiagnostics', params: { uri: doc.uri, version: doc.version, diagnostics: [...diagnostics, ...featureWarnings(doc)] } });
   if (doc.text.includes('INDEX-BEGIN')) send({ id: 'progress-create', method: 'window/workDoneProgress/create', params: { token: indexToken } });
   if (doc.text.includes('INDEX-END')) send({ method: '$/progress', params: { token: indexToken, value: { kind: 'end' } } });
 }
