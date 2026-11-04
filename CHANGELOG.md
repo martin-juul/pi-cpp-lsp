@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-04
+
 ### Added
 
 - C++ feature lists: for every target on C++11 or newer, the extension measures which C++11 to C++26 features the build compiler supports with the target's own compile command, and which ones clangd supports. The session briefing lists them per group of targets: the available features by standard, the features that need a flag such as GCC's `-freflection`, and the features clangd lacks.
@@ -68,7 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/cpp-setup` toolchain check command and `cpp-setup` skill.
 - C++ guidelines injected into the system prompt.
 
-[Unreleased]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/martin-juul/pi-cpp-lsp/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.2.0...v2.0.0
 [1.2.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/martin-juul/pi-cpp-lsp/releases/tag/v1.0.0
