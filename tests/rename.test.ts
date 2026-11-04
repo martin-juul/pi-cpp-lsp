@@ -435,6 +435,18 @@ test("changed files in a gap target show the compiler's verdict instead of clang
   assert.doesNotMatch(result.text, /the build may be broken/);
 });
 
+test("a dependent the compiler could not check is named, and the check never claims no errors", async t => {
+  const h = await gapProject(t, [
+    { name: "lib", sources: { "lib.cpp": "int old_name();\n" } },
+    { name: "app", gap: true, dependencies: ["lib"], sources: { "widget.cpp": "int x = old_name();\n" } },
+  ], {}, renameIn("lib.cpp"), { output: file => file.endsWith("widget.cpp") ? "widget.cpp:1:9: internal compiler error: in tsubst, at cp/pt.cc:1\n" : "" });
+  const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
+  assert.equal(result.isError, false, result.text);
+  assert.match(result.text, /could not check widget\.cpp: widget\.cpp:1:9: internal compiler error/);
+  assert.doesNotMatch(result.text, /no errors/);
+  assert.deepEqual(result.details.uncheckable.map((entry: { file: string }) => entry.file), [join(h.root, "widget.cpp")]);
+});
+
 test("a rename in a project without gap targets runs no compiler", async t => {
   const h = await gapProject(t, [{ name: "app", sources: { "a.cpp": "int old_name();\n" } }], {}, renameIn("a.cpp"));
   const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });

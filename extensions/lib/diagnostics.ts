@@ -5,7 +5,7 @@ import { probeInvocation, resolveCompileInvocation, type CompilationEntry } from
 import { plural } from "./output.ts";
 import type { Exec } from "./project/configure.ts";
 import type { ProjectService } from "./project/session.ts";
-import { featureLabels, type TargetProfile, type ToolchainService } from "./toolchain.ts";
+import { featureLabels, type TargetProfile, type ToolchainService, HEADER_EXTENSIONS } from "./toolchain.ts";
 
 /** How long a write or edit waits for clangd's diagnostics at the synced version (KTD13 step 4). */
 export const DIAGNOSTICS_WAIT_MS = 3_000;
@@ -22,7 +22,6 @@ export const COMPILER_CHECK_TIMEOUT_MS = 15_000;
 const NOTE_PREFIX = "[cpp-lsp]";
 const CPP_EXTENSIONS = new Set([".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hxx", ".hh"]);
 const SEVERITY = ["error", "warning"] as const;
-const HEADER_EXTENSIONS = new Set([".h", ".hh", ".hpp", ".hxx"]);
 
 /** Whether `file` is a C/C++ source or header, the files that get formatting and diagnostics. */
 function isCppFile(file: string): boolean {

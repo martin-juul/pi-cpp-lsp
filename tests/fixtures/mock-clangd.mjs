@@ -40,7 +40,9 @@ function featureWarnings(doc) {
   const args = probeCommand(doc.uri);
   if (args.includes('-w')) return [];
   const severity = args.some(arg => arg.startsWith('-Werror')) ? 1 : 2;
-  return mockFeatures.filter(id => doc.text.includes(`"pi-cpp-lsp-feature:${id}"`))
+  // --mock-cut-short drops the closing marker, like a probe stopped at an error limit.
+  const ids = process.argv.includes('--mock-cut-short') ? mockFeatures : [...mockFeatures, 'end'];
+  return ids.filter(id => doc.text.includes(`"pi-cpp-lsp-feature:${id}"`))
     .map(id => ({ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, severity, message: `pi-cpp-lsp-feature:${id}` }));
 }
 function opened(doc) {

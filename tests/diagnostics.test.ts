@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../extensions/index.ts";
 import { ClangdConnection, type Diagnostic } from "../extensions/lib/clangd.ts";
-import { COMPILER_CHECK_TIMEOUT_MS, parseCompilerOutput, postEditNote } from "../extensions/lib/diagnostics.ts";
+import { COMPILER_CHECK_TIMEOUT_MS, parseCompilerOutput, postEditNote, checkWithCompiler } from "../extensions/lib/diagnostics.ts";
 import type { Exec } from "../extensions/lib/project/configure.ts";
 import type { ProjectModel } from "../extensions/lib/project/model.ts";
 import { ProjectService } from "../extensions/lib/project/session.ts";
@@ -405,5 +405,22 @@ test("with real GCC 16 reflection and contracts, the post-edit note reads no pro
     assert.match(alone!, /(?:^\[cpp-lsp\] |\n)diagnostics: \d+ errors?/, `clangd alone reports errors in ${path}`);
     const checked = await postEditNote(file, { ...generous, toolchain });
     assert.match(checked!, /(?:^\[cpp-lsp\] |\n)diagnostics: no problems\nchecked by g\+\+ 16; clangd lacks .*static reflection.*contracts/, `${path}: ${checked}`);
+  }
+});
+
+test("every kind of included file borrows its target's command, not only .h and .hpp", async () => {
+  const profile = {
+    target: "app", standard: 26 as const, compiler: "g++ 16", family: "gcc" as const, available: [], needsFlag: {}, clangdLacks: ["contracts"], gap: true,
+    entry: { file: "/project/src/a.cpp", directory: "/project/build", argv: ["g++", "-std=c++26", "-c", "/project/src/a.cpp"] },
+  };
+  for (const file of ["/project/include/impl.tpp", "/project/include/inline.inl", "/project/include/detail.ipp"]) {
+    const calls: string[][] = [];
+    const result = await checkWithCompiler(file, profile, {
+      cwd: "/project",
+      exec: async (_command, args) => { calls.push(args); return { stdout: "", stderr: "", code: 0, killed: false }; },
+    });
+    assert.ok(result.ok, file);
+    assert.deepEqual(calls[0]!.slice(-3), ["-fdiagnostics-plain-output", "-fsyntax-only", file]);
+    assert.ok(calls[0]!.includes("-x"), file);
   }
 });

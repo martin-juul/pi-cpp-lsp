@@ -194,6 +194,7 @@ export function featureLabels(ids: Iterable<string>): string {
 }
 
 const PROBE_MARKER = "pi-cpp-lsp-feature:";
+const PROBE_END = "end";
 const MARKER_PATTERN = new RegExp(`${PROBE_MARKER}(\\w+)`);
 const ALTERNATIVE_PREFIX = "PI_CPP_LSP_ALT_";
 const PROBE_TIMEOUT_MS = 10_000;
@@ -219,6 +220,8 @@ export function probeSource(warnings: boolean): string {
     if (warnings) lines.push(`#if ${condition(feature)}`, `#warning "${PROBE_MARKER}${feature.id}"`, "#endif");
     else if (feature.alternative) lines.push(`#if ${feature.alternative}`, `#define ${ALTERNATIVE_PREFIX}${feature.id} 1`, "#endif");
   }
+  // Always last: without it, a probe that was cut short or silenced would read as missing features.
+  if (warnings) lines.push(`#warning "${PROBE_MARKER}${PROBE_END}"`);
   return `${lines.join("\n")}\n`;
 }
 
@@ -270,10 +273,6 @@ async function withProbe<T>(source: string, body: (dir: string, probe: string) =
   }
 }
 
-/**
- * Which listed features the entry's compiler supports with the entry's own flags, and which
- * ones it supports only behind an extra flag.
- */
 /** The entry's probe invocation, or why it cannot run (a wrapper or an unsupported flag). */
 function probeFor(entry: CompilationEntry): ReturnType<typeof probeInvocation> | { reason: string } {
   try {
@@ -283,6 +282,10 @@ function probeFor(entry: CompilationEntry): ReturnType<typeof probeInvocation> |
   }
 }
 
+/**
+ * Which listed features the entry's compiler supports with the entry's own flags, and which
+ * ones it supports only behind an extra flag.
+ */
 export async function measureCompiler(entry: CompilationEntry, exec: Exec, signal?: AbortSignal): Promise<CompilerMeasurement> {
   const invocation = probeFor(entry);
   if ("reason" in invocation) return { ok: false, reason: invocation.reason };
@@ -322,7 +325,8 @@ export type ClangdMeasurement = { ok: true; available: string[] } | { ok: false;
 
 /** Flags that would silence the probe's `#warning`s or turn them into a different shape. */
 function silencesWarnings(arg: string): boolean {
-  return arg === "-w" || arg === "-Wno-#warnings" || arg === "-Wno-cpp" || /^-Werror(?:=|$)/.test(arg) || /^-Wno-error(?:=|$)/.test(arg);
+  return arg === "-w" || arg === "-Wno-#warnings" || arg === "-Wno-cpp" || arg === "-Wno-everything" || arg === "-pedantic-errors"
+    || /^-Werror(?:=|$)/.test(arg) || /^-Wno-error(?:=|$)/.test(arg) || /^-f(?:error-limit|max-errors)=/.test(arg);
 }
 
 /**
@@ -334,7 +338,9 @@ export async function measureClangd(entry: CompilationEntry, options: ClangdOpti
   const invocation = probeFor(entry);
   if ("reason" in invocation) return { ok: false, reason: invocation.reason };
   return withProbe(probeSource(true), async (dir, probe) => {
-    const args = invocation.args.filter(arg => !silencesWarnings(arg));
+    // Before C++23 a #warning is an extension, so pedantic settings can turn the markers into errors;
+    // no error limit may then stop clangd before the last one.
+    const args = [...invocation.args.filter(arg => !silencesWarnings(arg)), "-ferror-limit=0"];
     writeFileSync(join(dir, "compile_commands.json"), JSON.stringify([{ directory: invocation.cwd, file: probe, arguments: [invocation.compiler, ...args, probe] }]));
     const connection = new ClangdConnection(dir, dir, options);
     try {
@@ -342,10 +348,14 @@ export async function measureClangd(entry: CompilationEntry, options: ClangdOpti
       const result = await connection.waitForDiagnostics(probe, version, timeoutMs);
       if (result.status === "pending") return { ok: false, reason: `clangd did not answer the feature probe within ${Math.round(timeoutMs / 1000)}s` };
       const present = new Set<string>();
+      let complete = false;
       for (const diagnostic of result.diagnostics) {
         const match = diagnostic.message.match(MARKER_PATTERN);
-        if (match && featureById.has(match[1]!)) present.add(match[1]!);
+        if (match?.[1] === PROBE_END) complete = true;
+        else if (match && featureById.has(match[1]!)) present.add(match[1]!);
       }
+      // Something in clangd's configuration hid or stopped the markers; that is no evidence of missing features.
+      if (!complete) return { ok: false, reason: "clangd's feature probe was cut short or its warnings were suppressed" };
       return { ok: true, available: sortFeatures(present) };
     } catch (error) {
       return { ok: false, reason: (error as Error).message };
@@ -398,7 +408,8 @@ export interface ToolchainProject {
 
 /** Distinct compile command groups measured at once. */
 const MEASURE_CONCURRENCY = 2;
-const HEADER_EXTENSIONS = new Set([".h", ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".tpp", ".inl"]);
+/** Files that are included rather than compiled on their own; a check compiles them with a borrowed command. */
+export const HEADER_EXTENSIONS: ReadonlySet<string> = new Set([".h", ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".tpp", ".inl"]);
 
 /**
  * The catalog standard a normalized target standard ("20", "23", "26", "98") is measured for:

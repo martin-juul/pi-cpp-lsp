@@ -58,6 +58,8 @@ interface BuildCheck {
   targets: TargetProfile[];
   /** A checked file has a compiler error. */
   broken: boolean;
+  /** Files other than the changed ones the compiler could not check in time or at all, with why. */
+  failed: { file: string; reason: string }[];
 }
 
 /**
@@ -97,7 +99,7 @@ async function buildCheck(model: ProjectModel, targets: TargetProfile[], changed
   }
   for (const file of changed) {
     const profile = toolchain.gapProfileFor(file);
-    if (profile && targets.includes(profile)) add(file, profile);
+    if (profile && targets.some(target => target.target === profile.target)) add(file, profile);
   }
   const deadline = Date.now() + options.limitMs;
   // Loaded once: every source would otherwise read and parse the whole database again.
@@ -114,7 +116,10 @@ async function buildCheck(model: ProjectModel, targets: TargetProfile[], changed
     else results.set(file, result);
   });
   const broken = [...results.values()].some(result => result.ok && result.problems.some(problem => problem.severity === "error"));
-  return { results, unchecked: targets.map(profile => profile.target).filter(name => unchecked.has(name)), targets, broken };
+  // A changed file's failure shows in its own entry; any other is a dependent the check never verified.
+  const failed = [...results].filter(([file, result]) => !result.ok && !changed.includes(file))
+    .map(([file, result]) => ({ file, reason: (result as Extract<CompilerCheck, { ok: false }>).reason }));
+  return { results, unchecked: targets.map(profile => profile.target).filter(name => unchecked.has(name)), targets, broken, failed };
 }
 
 const sameProblem = (a: CompilerProblem, b: CompilerProblem) => a.file === b.file && a.line === b.line && a.column === b.column && a.message === b.message;
@@ -146,8 +151,9 @@ function buildCheckLines(check: BuildCheck, changed: Set<string>, limitMs: numbe
     lines.push(...renderCompilerProblems(errors.slice(0, MAX_DIAGNOSTICS), cwd).slice(1).map(line => `  ${line}`));
     if (errors.length > MAX_DIAGNOSTICS) lines.push(`  [${errors.length - MAX_DIAGNOSTICS} more errors omitted]`);
   }
+  for (const { file, reason } of check.failed) lines.push(`  could not check ${cwdDisplayPath(cwd, file)}: ${reason}`);
   if (check.broken) lines.push("  the build may be broken: fix these errors; the rename was not undone");
-  else if (check.unchecked.length === 0) lines.push("  no errors");
+  else if (check.unchecked.length === 0 && check.failed.length === 0) lines.push("  no errors");
   if (check.unchecked.length > 0) lines.push(`  not checked within ${Math.round(limitMs / 100) / 10}s: ${check.unchecked.join(", ")}`);
   return lines;
 }
@@ -337,7 +343,7 @@ export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd
       for (const entry of planned) {
         let noteLines = notes.get(entry.file)!;
         const profile = check ? toolchain?.gapProfileFor(entry.file) : undefined;
-        if (check && profile && check.targets.includes(profile)) noteLines = changedFileLines(entry.file, noteLines, profile, check.results.get(entry.file), ctx.cwd);
+        if (check && profile && check.targets.some(target => target.target === profile.target)) noteLines = changedFileLines(entry.file, noteLines, profile, check.results.get(entry.file), ctx.cwd);
         changed.push({ file: entry.file, edits: entry.edits, note: postEditText(noteLines) });
         lines.push(`${cwdDisplayPath(ctx.cwd, entry.file)}: ${plural(entry.edits, "edit")}`);
         if (noteLines.length > 0) lines.push(...noteLines.join("\n").split("\n").map(line => `  ${line}`));
@@ -345,7 +351,7 @@ export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd
       if (check) lines.push(...buildCheckLines(check, new Set(files), limitMs, ctx.cwd));
       const drift = await project.reportPoint().catch(() => undefined);
       if (drift) lines.push(drift);
-      return { content: [{ type: "text" as const, text: bounded(lines.join("\n")) }], details: { ...base, changed, drift, ...(check ? { buildBroken: check.broken, unchecked: check.unchecked } : {}) } };
+      return { content: [{ type: "text" as const, text: bounded(lines.join("\n")) }], details: { ...base, changed, drift, ...(check ? { buildBroken: check.broken, unchecked: check.unchecked, uncheckable: check.failed } : {}) } };
     },
   });
 }

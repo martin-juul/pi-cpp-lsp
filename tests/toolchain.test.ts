@@ -127,6 +127,12 @@ test("-w and -Werror in the compile command do not hide the clangd probe's warni
   assert.deepEqual(result, { ok: true, available: ["embed"] });
 });
 
+test("a clangd probe cut short before its last marker is a failed measurement, not missing features", async () => {
+  const result = await measureClangd(entry(["g++", "-std=c++26"]), { ...mock("pack_indexing"), args: [...mock("pack_indexing").args, "--mock-cut-short"] });
+  assert.equal(result.ok, false);
+  assert.match(!result.ok ? result.reason : "", /cut short/);
+});
+
 test("a missing or silent clangd gives a reason", async () => {
   const missing = await measureClangd(entry(["g++", "-std=c++26"]), { command: "/nonexistent/clangd", timeoutMs: 1000 });
   assert.equal(missing.ok, false);
@@ -155,6 +161,14 @@ test("real GCC with reflection: the plain probe needs -freflection, the flagged 
   assert.ok(plain.available.includes("contracts") && plain.available.includes("embed"));
   const flagged = await measureCompiler({ file: "/x.cpp", directory: tmpdir(), argv: ["g++", "-std=c++26", "-freflection", "/x.cpp"] }, exec);
   assert.ok(flagged.ok && flagged.available.includes("reflection"));
+});
+
+test("real clangd measures the same features with -pedantic-errors before C++23, where #warning is an extension", { skip: clangdMajor < 23 && "needs clangd 23 or newer" }, async () => {
+  const plain = await measureClangd({ file: "/x.cpp", directory: tmpdir(), argv: ["clang++", "-std=c++17", "/x.cpp"] });
+  const pedantic = await measureClangd({ file: "/x.cpp", directory: tmpdir(), argv: ["clang++", "-std=c++17", "-pedantic-errors", "-ferror-limit=5", "/x.cpp"] });
+  assert.ok(plain.ok && pedantic.ok, JSON.stringify([plain, pedantic]));
+  assert.ok(plain.available.length > 50);
+  assert.deepEqual(pedantic.available, plain.available);
 });
 
 test("real clangd 23+ under a GCC reflection command lacks reflection and contracts but has #embed", { skip: clangdMajor < 23 && "needs clangd 23 or newer" }, async () => {
