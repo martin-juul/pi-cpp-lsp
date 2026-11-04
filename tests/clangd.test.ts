@@ -10,7 +10,6 @@ import { ProjectService } from "../extensions/lib/project/session.ts";
 import type { ProjectModel } from "../extensions/lib/project/model.ts";
 import { pathToFileURL } from "node:url";
 import { ClangdConnection, ClangdUnsupportedError, registerClangdTools, type ClangdOptions, type ClangdToolOptions } from "../extensions/lib/clangd.ts";
-import type { TargetProfile } from "../extensions/lib/toolchain.ts";
 
 const fixture = resolve("tests/fixtures/mock-clangd.mjs");
 /** Registers the clangd tools on a fake ExtensionAPI that keeps every event handler. */
@@ -116,28 +115,6 @@ test("hover output is bounded", async t => {
   const result = await h.call();
   assert.ok(result.content[0].text.length < 25_000);
   assert.match(result.content[0].text, /output truncated/);
-});
-
-test("hover and definition on a file in a gap target note the features clang-based tools lack; other files get no note", async t => {
-  const profile: TargetProfile = { target: "app", standard: 26, compiler: "g++ 16", family: "gcc", available: ["reflection", "contracts"], needsFlag: {}, clangdLacks: ["contracts", "reflection"], gap: true };
-  let gapFile = "";
-  const h = await harness(t, { command: process.execPath, args: [fixture], timeoutMs: 1000, gapProfileFor: file => file === gapFile ? profile : undefined });
-  gapFile = h.file;
-  const note = "[clang-based tools lack static reflection, contracts, which the build compiler supports for target app; results for code that uses them may be wrong]";
-
-  const hover = await h.call("hover");
-  assert.equal(hover.isError, undefined, hover.content[0].text);
-  const hoverLines = hover.content[0].text.split("\n");
-  assert.equal(hoverLines.at(-1), note);
-  assert.equal(hoverLines.slice(0, -1).join("\n"), hover.details.hover, "the note follows the unchanged hover text");
-  const definition = await h.call("definition");
-  assert.equal(definition.content[0].text, `${h.file}:2:3\n${note}`);
-
-  const other = join(h.cwd, "other.cpp");
-  await writeFile(other, "int other;\n");
-  const plain = await h.call("hover", { file: other });
-  assert.equal(plain.content[0].text, plain.details.hover);
-  assert.equal((await h.call("definition", { file: other })).content[0].text, `${other}:2:3`);
 });
 
 const clangdAvailable = spawnSync("clangd", ["--version"], { encoding: "utf8" }).status === 0;

@@ -397,13 +397,14 @@ async function gapProject(t: any, specs: TargetSpec[], files: Record<string, str
     const stderr = options.output?.(file) ?? "";
     return { stdout: "", stderr, code: stderr.includes("error:") ? 1 : 0, killed: false };
   };
-  const registered = register({ command: process.execPath, args: [mock], timeoutMs: 2000 }, () => project, { exec, toolchain, renameCheckMs: options.renameCheckMs });
+  const logged: string[] = [];
+  const registered = register({ command: process.execPath, args: [mock], timeoutMs: 2000 }, () => project, { exec, toolchain, renameCheckMs: options.renameCheckMs, log: line => logged.push(line) });
   t.after(async () => {
     await registered.emit("session_shutdown");
     await rm(root, { recursive: true, force: true });
   });
   await registered.emit("session_start");
-  return { root, compiled, call: caller(registered.tools, root) };
+  return { root, compiled, logged, call: caller(registered.tools, root) };
 }
 
 const renameIn = (...names: string[]) => (root: string) => ({
@@ -430,20 +431,21 @@ test("changed files in a gap target show the compiler's verdict instead of clang
   const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
   assert.equal(result.isError, false, result.text);
   assert.doesNotMatch(result.text, /mock error/);
-  assert.equal(result.text.match(/checked by g\+\+ 16; clangd lacks contracts/g)?.length, 2, result.text);
+  assert.equal(result.text.match(/checked by g\+\+ 16$/gm)?.length, 2, result.text);
   assert.deepEqual(h.compiled.filter(file => /[ab]\.cpp$/.test(file)).sort(), [join(h.root, "a.cpp"), join(h.root, "b.cpp")]);
   assert.doesNotMatch(result.text, /the build may be broken/);
 });
 
-test("a dependent the compiler could not check is named, and the check never claims no errors", async t => {
+test("a dependent the compiler could not check is logged, and the check never claims no errors", async t => {
   const h = await gapProject(t, [
     { name: "lib", sources: { "lib.cpp": "int old_name();\n" } },
     { name: "app", gap: true, dependencies: ["lib"], sources: { "widget.cpp": "int x = old_name();\n" } },
   ], {}, renameIn("lib.cpp"), { output: file => file.endsWith("widget.cpp") ? "widget.cpp:1:9: internal compiler error: in tsubst, at cp/pt.cc:1\n" : "" });
   const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
   assert.equal(result.isError, false, result.text);
-  assert.match(result.text, /could not check widget\.cpp: widget\.cpp:1:9: internal compiler error/);
-  assert.doesNotMatch(result.text, /no errors/);
+  assert.match(result.text, /1 file could not be checked; see the pi-cpp-lsp log/);
+  assert.doesNotMatch(result.text, /no errors|internal compiler error/);
+  assert.match(h.logged.join("\n"), /could not check .*widget\.cpp: widget\.cpp:1:9: internal compiler error/);
   assert.deepEqual(result.details.uncheckable.map((entry: { file: string }) => entry.file), [join(h.root, "widget.cpp")]);
 });
 
@@ -454,16 +456,18 @@ test("a rename in a project without gap targets runs no compiler", async t => {
   assert.deepEqual(h.compiled, []);
 });
 
-test("a check that runs out of time names the targets it did not reach", async t => {
+test("a check that runs out of time says so and logs the targets it did not reach", async t => {
   const h = await gapProject(t, [
     { name: "app", gap: true, sources: { "a.cpp": "int old_name(); // DIAG\n" } },
   ], {}, renameIn("a.cpp"), { delayMs: 500, renameCheckMs: 100 });
   const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
   assert.equal(result.isError, false, result.text);
-  assert.match(result.text, /not checked within 0\.1s: app/);
-  // The changed file keeps clangd's errors, with the warning that they may be false.
+  assert.match(result.text, /not every file was checked within 0\.1s; see the pi-cpp-lsp log/);
+  assert.match(h.logged.join("\n"), /not checked within 0\.1s: app/);
+  // The changed file keeps clangd's errors; why the compiler did not judge it is in the log.
   assert.match(result.text, /mock error/);
-  assert.match(result.text, /warning: clangd lacks contracts, so errors involving them may be false/);
+  assert.doesNotMatch(result.text, /warning: clangd lacks/);
+  assert.match(h.logged.join("\n"), /a\.cpp: g\+\+ 16 could not check it/);
 });
 
 test("a changed header no target lists makes every gap target part of the check", async t => {

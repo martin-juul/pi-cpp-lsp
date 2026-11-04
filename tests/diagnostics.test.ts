@@ -171,11 +171,11 @@ async function gapProject(t: any, diagnostics: Diagnostic[], name = "src/widget.
 const clangdError = diagnostic(0, 1, "expected expression");
 const bounds = { waitMs: 2000, firstOpenWaitMs: 4000 };
 
-test("in a gap target the build compiler's clean verdict replaces clangd's errors, naming the compiler and the features clangd lacks", async t => {
+test("in a gap target the build compiler's clean verdict replaces clangd's errors and names the compiler", async t => {
   const g = await gapProject(t, [clangdError]);
   const { calls, exec } = compilerExec({ stdout: "", stderr: "", code: 0, killed: false });
   const note = await postEditNote(g.file, { cwd: g.cwd, exec, project: g.project, clangd: g.clangd, toolchain: g.toolchain, ...bounds });
-  assert.equal(note, "[cpp-lsp] diagnostics: no problems\nchecked by g++ 16; clangd lacks static reflection, contracts");
+  assert.equal(note, "[cpp-lsp] diagnostics: no problems\nchecked by g++ 16");
   assert.equal(calls.length, 1);
   const [call] = calls;
   // The same invocation cpp_compile uses: the entry's command from the project's build directory.
@@ -191,7 +191,7 @@ test("in a gap target a real error from the build compiler is shown at its line,
   const stderr = `${g.source}: In function 'int area()':\n${g.source}:3:12: error: invalid conversion from 'const char*' to 'int' [-fpermissive]\n`;
   const { exec } = compilerExec({ stdout: "", stderr, code: 1, killed: false });
   const note = await postEditNote(g.file, { cwd: g.cwd, exec, project: g.project, clangd: g.clangd, toolchain: g.toolchain, ...bounds });
-  assert.equal(note, "[cpp-lsp] diagnostics: 1 error\nsrc/widget.cpp:3:12: error: invalid conversion from 'const char*' to 'int' [-fpermissive]\nchecked by g++ 16; clangd lacks static reflection, contracts");
+  assert.equal(note, "[cpp-lsp] diagnostics: 1 error\nsrc/widget.cpp:3:12: error: invalid conversion from 'const char*' to 'int' [-fpermissive]\nchecked by g++ 16");
   assert.doesNotMatch(note!, /expected expression/);
 });
 
@@ -212,28 +212,31 @@ test("a file clangd finds clean in a gap target does not run the compiler", asyn
   assert.equal(calls.length, 0);
 });
 
-test("a compiler check that does not finish in time keeps clangd's errors and warns that errors involving the missing features may be false", async t => {
+test("a compiler check that does not finish in time keeps clangd's errors in the note and logs why", async t => {
   const g = await gapProject(t, [clangdError]);
   // pi.exec kills the compiler at the timeout and reports it as killed.
   const { exec } = compilerExec({ stdout: "", stderr: "", code: 1, killed: true });
-  const note = await postEditNote(g.file, { cwd: g.cwd, exec, project: g.project, clangd: g.clangd, toolchain: g.toolchain, ...bounds });
-  assert.equal(note, "[cpp-lsp] diagnostics: 1 error\nsrc/widget.cpp:1:5: error: expected expression\n"
-    + "warning: clangd lacks static reflection, contracts, so errors involving them may be false; g++ 16 could not check the file: it did not finish within 15s");
+  const logged: string[] = [];
+  const note = await postEditNote(g.file, { cwd: g.cwd, exec, project: g.project, clangd: g.clangd, toolchain: g.toolchain, log: line => logged.push(line), ...bounds });
+  assert.equal(note, "[cpp-lsp] diagnostics: 1 error\nsrc/widget.cpp:1:5: error: expected expression");
+  assert.equal(logged.length, 1);
+  assert.match(logged[0]!, /widget\.cpp: g\+\+ 16 could not check it, so clangd's diagnostics stand \(clangd lacks static reflection, contracts\): it did not finish within 15s$/);
 });
 
 test("a compiler that fails without reporting an error in the file counts as not having checked it", async t => {
   const g = await gapProject(t, [clangdError]);
   const { exec } = compilerExec({ stdout: "", stderr: "g++: error: unrecognized command-line option '-freflection'\n", code: 1, killed: false });
-  const note = await postEditNote(g.file, { cwd: g.cwd, exec, project: g.project, clangd: g.clangd, toolchain: g.toolchain, ...bounds });
-  assert.equal(note, "[cpp-lsp] diagnostics: 1 error\nsrc/widget.cpp:1:5: error: expected expression\n"
-    + "warning: clangd lacks static reflection, contracts, so errors involving them may be false; g++ 16 could not check the file: g++: error: unrecognized command-line option '-freflection'");
+  const logged: string[] = [];
+  const note = await postEditNote(g.file, { cwd: g.cwd, exec, project: g.project, clangd: g.clangd, toolchain: g.toolchain, log: line => logged.push(line), ...bounds });
+  assert.equal(note, "[cpp-lsp] diagnostics: 1 error\nsrc/widget.cpp:1:5: error: expected expression");
+  assert.match(logged[0]!, /could not check it.*g\+\+: error: unrecognized command-line option '-freflection'$/);
 });
 
 test("an edited header in a gap target is compiled on its own with the target's borrowed command", async t => {
   const g = await gapProject(t, [clangdError], "src/widget.hpp", "clang");
   const { calls, exec } = compilerExec({ stdout: "", stderr: "", code: 0, killed: false });
   const note = await postEditNote(g.file, { cwd: g.cwd, exec, project: g.project, clangd: g.clangd, toolchain: g.toolchain, ...bounds });
-  assert.equal(note, "[cpp-lsp] diagnostics: no problems\nchecked by clang++ 23; clangd lacks static reflection, contracts");
+  assert.equal(note, "[cpp-lsp] diagnostics: no problems\nchecked by clang++ 23");
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.command, "clang++");
   assert.equal(calls[0]!.options.cwd, g.build);
@@ -404,7 +407,7 @@ test("with real GCC 16 reflection and contracts, the post-edit note reads no pro
     const alone = await postEditNote(file, generous);
     assert.match(alone!, /(?:^\[cpp-lsp\] |\n)diagnostics: \d+ errors?/, `clangd alone reports errors in ${path}`);
     const checked = await postEditNote(file, { ...generous, toolchain });
-    assert.match(checked!, /(?:^\[cpp-lsp\] |\n)diagnostics: no problems\nchecked by g\+\+ 16; clangd lacks .*static reflection.*contracts/, `${path}: ${checked}`);
+    assert.match(checked!, /(?:^\[cpp-lsp\] |\n)diagnostics: no problems\nchecked by g\+\+ 16$/m, `${path}: ${checked}`);
   }
 });
 

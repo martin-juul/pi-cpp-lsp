@@ -129,7 +129,7 @@ test("a GCC 16 target without -freflection lists reflection as needing the flag 
   assert.ok(cxx11Line?.includes("rvalue references") && cxx11Line.includes("thread-safe static initialization"), text);
 });
 
-test("targets with the same profile share one line, and a measurement error is shown", () => {
+test("targets with the same profile share one line, and a target that could not be measured is left out", () => {
   const text = renderBriefing(base({
     model: cxx26("app", "core", "tool"),
     features: { measuring: false, profiles: [
@@ -138,7 +138,7 @@ test("targets with the same profile share one line, and a measurement error is s
     ] },
   }));
   assert.match(text, /^- app, core \(C\+\+26, g\+\+ 16\):$/m);
-  assert.match(text, /^- tool \(C\+\+26\): the build compiler could not be measured: c\+\+ could not run the feature probe: cc1plus: error: bad flag$/m);
+  assert.doesNotMatch(text, /^- tool|could not be measured|bad flag/m);
 });
 
 test("without measured targets there is no feature section", () => {

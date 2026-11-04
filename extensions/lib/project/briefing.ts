@@ -1,7 +1,7 @@
 import { dirname, isAbsolute, relative } from "node:path";
 import type { ConfigureResult } from "./configure.ts";
 import type { DriftFinding, ReferencedSource } from "./drift.ts";
-import { oneLine, plural } from "../output.ts";
+import { plural } from "../output.ts";
 import { formatStandard, ownersOf, type ProjectModel, type ProjectTarget } from "./model.ts";
 import { catalogStandard, featureLabels, FEATURES, STANDARDS, type Feature, type TargetProfile } from "../toolchain.ts";
 
@@ -98,7 +98,6 @@ const FEATURES_INTRO = "What each target's build compiler accepts with the targe
 const FEATURE_CHECK_RUNNING = "The check of which C++ features each target's build compiler and clangd support is still running; its results follow in a later update.";
 /** Share of the summary budget the feature groups may take. */
 const SUMMARY_FEATURE_SHARE = 1 / 3;
-const SUMMARY_REASON_CHARS = 150;
 const SUMMARY_NAMED_TARGETS = 3;
 
 /** Whether the feature check has no results yet but will measure targets of this model. */
@@ -107,13 +106,12 @@ export function featureCheckRunning(features: FeatureState | undefined, model: P
     && !!model?.targets.some(target => target.isProjectTarget && catalogStandard(target.cxxStandard) !== undefined);
 }
 
-const capped = (text: string, chars: number) => text.length > chars ? `${text.slice(0, chars - 3)}...` : text;
-
 /** Targets with identical results, in first-seen order. */
 function profileGroups(profiles: readonly TargetProfile[]): { targets: string[]; profile: TargetProfile }[] {
   const groups = new Map<string, { targets: string[]; profile: TargetProfile }>();
-  for (const profile of profiles) {
-    const key = JSON.stringify([profile.standard, profile.compiler, profile.available, Object.entries(profile.needsFlag).sort(), profile.clangdLacks, profile.error, profile.clangdError]);
+  // A target the compiler could not be measured for has nothing to show; the reason is in the log.
+  for (const profile of profiles.filter(candidate => !candidate.error)) {
+    const key = JSON.stringify([profile.standard, profile.compiler, profile.available, Object.entries(profile.needsFlag).sort(), profile.clangdLacks]);
     const group = groups.get(key);
     if (group) group.targets.push(profile.target);
     else groups.set(key, { targets: [profile.target], profile });
@@ -132,16 +130,13 @@ function flagParts(needsFlag: Record<string, string>, word = "needs"): string[] 
 
 /** A group with every available feature listed per standard. */
 function detailedGroup(targets: string[], profile: TargetProfile): string[] {
-  const title = groupTitle(targets, profile);
-  if (profile.error) return [`- ${title}: the build compiler could not be measured: ${oneLine(profile.error)}`];
-  const lines = [`- ${title}:`];
+  const lines = [`- ${groupTitle(targets, profile)}:`];
   for (const standard of STANDARDS.filter(standard => standard <= profile.standard)) {
     const ids = profile.available.filter(id => FEATURES.some(feature => feature.id === id && feature.standard === standard));
     lines.push(`  - C++${standard}: ${ids.length > 0 ? featureLabels(ids) : "none"}`);
   }
   for (const part of flagParts(profile.needsFlag, "Needs")) lines.push(`  - ${part}`);
-  if (profile.clangdError) lines.push(`  - clangd could not be measured: ${oneLine(profile.clangdError)}`);
-  else if (profile.clangdLacks.length > 0) lines.push(`  - clangd lacks: ${featureLabels(profile.clangdLacks)}`);
+  if (profile.clangdLacks.length > 0) lines.push(`  - clangd lacks: ${featureLabels(profile.clangdLacks)}`);
   return lines;
 }
 
@@ -151,12 +146,10 @@ function summarizedGroup(targets: string[], profile: TargetProfile): string {
     ? [...targets.slice(0, SUMMARY_NAMED_TARGETS), `and ${targets.length - SUMMARY_NAMED_TARGETS} more`]
     : targets;
   const title = groupTitle(named, profile);
-  if (profile.error) return `- ${title}: not measured: ${capped(oneLine(profile.error), SUMMARY_REASON_CHARS)}`;
   const listed = FEATURES.filter(feature => feature.standard <= profile.standard).length;
   const parts = [profile.available.length === listed ? `all ${listed} listed features available` : `${profile.available.length} of ${listed} listed features available`];
   parts.push(...flagParts(profile.needsFlag));
-  if (profile.clangdError) parts.push(`clangd not measured: ${capped(oneLine(profile.clangdError), SUMMARY_REASON_CHARS)}`);
-  else if (profile.clangdLacks.length > 0) parts.push(`clangd lacks: ${featureLabels(profile.clangdLacks)}`);
+  if (profile.clangdLacks.length > 0) parts.push(`clangd lacks: ${featureLabels(profile.clangdLacks)}`);
   return `- ${title}: ${parts.join("; ")}.`;
 }
 
@@ -174,15 +167,15 @@ function summarizedGroups(profiles: readonly TargetProfile[], cap: number): stri
 function featureSection(input: BriefingInput, detailed: boolean, cap = Infinity): string[] {
   if (featureCheckRunning(input.features, input.model)) return ["## C++ features", FEATURE_CHECK_RUNNING];
   const profiles = input.features?.profiles ?? [];
-  if (profiles.length === 0) return [];
+  if (profileGroups(profiles).length === 0) return [];
   if (detailed) return ["## C++ features", FEATURES_INTRO, ...profileGroups(profiles).flatMap(group => detailedGroup(group.targets, group.profile))];
   return ["## C++ features (by group of targets with identical results; cpp_project overview lists every feature)", ...summarizedGroups(profiles, cap)];
 }
 
 /** The feature section as a late update, for a check that finished after the briefing went out. */
 export function featureUpdateLines(profiles: readonly TargetProfile[], budget = BRIEFING_BUDGET): string[] {
-  if (profiles.length === 0) return [];
   const groups = profileGroups(profiles);
+  if (groups.length === 0) return [];
   const detailed = groups.flatMap(group => detailedGroup(group.targets, group.profile));
   const body = detailed.join("\n").length <= budget ? detailed : [...summarizedGroups(profiles, budget), "cpp_project overview lists every feature."];
   return [`C++ feature check finished. ${FEATURES_INTRO}`, ...body];

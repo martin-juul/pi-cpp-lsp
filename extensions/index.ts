@@ -19,7 +19,7 @@ import { registerRenameTool } from "./lib/rename.ts";
 import { postEditNote, resolveToolPath, type PostEditOptions } from "./lib/diagnostics.ts";
 import { isSupportedCmake, probeCmake, supportsPresets, type CmakeVersion, type Exec } from "./lib/project/configure.ts";
 import { setupFeatureLines, ToolchainService, type ToolchainServiceOptions } from "./lib/toolchain.ts";
-import { clangToolsGapNote } from "./lib/gap-notes.ts";
+import { projectLog, type Log } from "./lib/log.ts";
 
 const FIXED_GUIDELINES = [
   "Prefer smart pointers over raw new/delete in C++ code.",
@@ -99,7 +99,10 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
   // ── CMake project session ──────────────────────────────────────
   let project: ProjectService | undefined;
   // Which C++ features the build compiler and clangd support, per target on C++11 or newer.
-  const toolchain = new ToolchainService({ exec, ...options.toolchain });
+  // What the extension cannot do (a feature clangd lacks, a check that could not run) goes to the
+  // project's log in the managed cache, so tool results carry no notes that repeat on every call.
+  const log: Log = message => { if (project?.root) projectLog(project.root)(message); };
+  const toolchain = new ToolchainService({ exec, log, ...options.toolchain });
 
   pi.on("session_start", async (_event, ctx) => {
     project?.dispose();
@@ -118,9 +121,9 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
   });
 
   // Registered after session_start so the managed clangd attaches to the new project at once (KTD11).
-  const clangd = registerClangdTools(pi, { getProject: () => project, gapProfileFor: file => toolchain.gapProfileFor(file) });
-  registerNavigationTools(pi, clangd, { gaps: () => toolchain.gapProfiles });
-  registerRenameTool(pi, clangd, { exec, getProject: () => project, toolchain, ...options.diagnostics });
+  const clangd = registerClangdTools(pi, { getProject: () => project });
+  registerNavigationTools(pi, clangd);
+  registerRenameTool(pi, clangd, { exec, getProject: () => project, toolchain, log, ...options.diagnostics });
 
   pi.on("session_shutdown", async () => {
     toolchain.close();
@@ -159,7 +162,7 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
       // Format, drift, owner and clangd diagnostics in one note (KTD13).
       note = input.path
         ? await postEditNote(resolveToolPath(ctx.cwd, input.path), {
-          exec, cwd: ctx.cwd, project, clangd, toolchain, ...options.diagnostics,
+          exec, cwd: ctx.cwd, project, clangd, toolchain, log, ...options.diagnostics,
         })
         : await project?.reportPoint();
     } else if (event.toolName === "bash") {
@@ -292,10 +295,8 @@ export default function (pi: ExtensionAPI, options: ExtensionOptions = {}) {
         }
       }
 
-      // After truncation, so a long tool output cannot cut the note off.
-      const gapNote = clangToolsGapNote(toolchain.gapProfileFor(file));
       return {
-        content: [{ type: "text", text: truncateOutput(`Compilation database: ${database ?? "none found"}\n\n${results.join("\n\n")}`) + (gapNote ? `\n\n${gapNote}` : "") }],
+        content: [{ type: "text", text: truncateOutput(`Compilation database: ${database ?? "none found"}\n\n${results.join("\n\n")}`) }],
         details: { file: params.file, tool, database, success: !failed },
         isError: failed,
       };

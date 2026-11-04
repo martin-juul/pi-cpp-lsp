@@ -230,6 +230,24 @@ function service(clangdFeatures: string[]) {
   return { probes, toolchain: new ToolchainService({ exec, clangd: mock(...clangdFeatures), clangdTimeoutMs: 2000 }) };
 }
 
+test("what clangd lacks and what could not be measured is logged, once per measurement", async (t) => {
+  const { project: fake } = project(t, [
+    { name: "app", sources: ["src/app.cpp"] },
+    { name: "tool", sources: ["src/tool.cpp"], flags: ["-DBROKEN"] },
+  ]);
+  const logged: string[] = [];
+  const exec: Exec = async (_command, args) => args.includes("-DBROKEN")
+    ? { stdout: "", stderr: "cc1plus: error: bad flag", code: 1, killed: false }
+    : { stdout: GCC16, stderr: "", code: 0, killed: false };
+  const toolchain = new ToolchainService({ exec, clangd: mock("pack_indexing"), clangdTimeoutMs: 2000, log: line => logged.push(line) });
+  t.after(() => toolchain.close());
+  toolchain.attach(fake);
+  await toolchain.settled();
+  assert.equal(logged.length, 2, logged.join("\n"));
+  assert.match(logged.join("\n"), /target app \(g\+\+ 16\): clangd lacks .*contracts/);
+  assert.match(logged.join("\n"), /target tool: the build compiler could not be measured: .*bad flag/);
+});
+
 test("standards map to the newest catalog standard not newer than them", () => {
   assert.deepEqual(["98", "03", "11", "14", "17", "20", "23", "26", "29", undefined].map(catalogStandard), [undefined, undefined, 11, 14, 17, 20, 23, 26, 26, undefined]);
 });

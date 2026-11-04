@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { bounded, position, waitFor, type ManagedClangd } from "./clangd.ts";
 import {
   checkedBy, checkWithCompiler, COMPILER_CHECK_TIMEOUT_MS, cwdDisplayPath, MAX_DIAGNOSTICS, postEditLines, postEditText, renderCompilerProblems,
-  uncheckedWarning, type CompilerCheck, type CompilerProblem, type PostEditOptions,
+  uncheckedEntry, type CompilerCheck, type CompilerProblem, type PostEditOptions,
 } from "./diagnostics.ts";
 import { plural } from "./output.ts";
 import type { Exec } from "./project/configure.ts";
@@ -15,6 +15,7 @@ import { loadCompilationDatabase, type CompilationEntry } from "./compdb.ts";
 import { bestRealPath, findTarget, isInSkippedDir, isWithin, ownersOf, type ProjectModel } from "./project/model.ts";
 import { projectCacheDir } from "./project/root.ts";
 import type { ProjectService } from "./project/session.ts";
+import type { Log } from "./log.ts";
 import { mapLimited, type TargetProfile, type ToolchainService } from "./toolchain.ts";
 
 /** How long a rename waits for clangd's background index to become idle (KTD14 step 2). */
@@ -47,6 +48,8 @@ export interface RenameToolOptions extends Pick<PostEditOptions, "waitMs" | "fir
   toolchain?: Pick<ToolchainService, "gapProfiles" | "gapProfileFor">;
   /** Bound for that check; defaults to RENAME_CHECK_MS. */
   renameCheckMs?: number;
+  /** Where the files and targets that check could not cover are recorded. */
+  log?: Log;
 }
 
 interface BuildCheck {
@@ -125,17 +128,19 @@ async function buildCheck(model: ProjectModel, targets: TargetProfile[], changed
 const sameProblem = (a: CompilerProblem, b: CompilerProblem) => a.file === b.file && a.line === b.line && a.column === b.column && a.message === b.message;
 
 /** The note lines of a changed file in a gap target: clangd's diagnostics give way to the compiler's verdict. */
-function changedFileLines(file: string, noteLines: string[], profile: TargetProfile, check: CompilerCheck | undefined, cwd: string): string[] {
+function changedFileLines(file: string, noteLines: string[], profile: TargetProfile, check: CompilerCheck | undefined, cwd: string, log?: Log): string[] {
   // The post-edit pipeline adds clangd's diagnostics last.
   const index = noteLines.findIndex(line => line.startsWith("diagnostics"));
   const before = index < 0 ? noteLines : noteLines.slice(0, index);
-  if (!check) return [...noteLines, uncheckedWarning(profile, "the check after the rename did not reach it in time")];
-  if (!check.ok) return [...noteLines, uncheckedWarning(profile, check.reason)];
+  if (!check || !check.ok) {
+    log?.(uncheckedEntry(file, profile, check ? check.reason : "the check after the rename did not reach it in time"));
+    return noteLines;
+  }
   return [...before, ...renderCompilerProblems(check.problems.filter(problem => problem.file === file), cwd), checkedBy(profile)];
 }
 
 /** The lines summing up the check: errors outside the changed files, whether the build may be broken, and what was not reached. */
-function buildCheckLines(check: BuildCheck, changed: Set<string>, limitMs: number, cwd: string): string[] {
+function buildCheckLines(check: BuildCheck, changed: Set<string>, limitMs: number, cwd: string, log?: Log): string[] {
   const compilers = [...new Set(check.targets.map(profile => profile.compiler ?? "the build compiler"))].join(", ");
   const errors: CompilerProblem[] = [];
   for (const [file, result] of check.results) {
@@ -151,10 +156,12 @@ function buildCheckLines(check: BuildCheck, changed: Set<string>, limitMs: numbe
     lines.push(...renderCompilerProblems(errors.slice(0, MAX_DIAGNOSTICS), cwd).slice(1).map(line => `  ${line}`));
     if (errors.length > MAX_DIAGNOSTICS) lines.push(`  [${errors.length - MAX_DIAGNOSTICS} more errors omitted]`);
   }
-  for (const { file, reason } of check.failed) lines.push(`  could not check ${cwdDisplayPath(cwd, file)}: ${reason}`);
+  // What the check could not cover goes to the log; the result only says that something was left out.
+  for (const { file, reason } of check.failed) log?.(`after a rename: could not check ${file}: ${reason}`);
+  if (check.unchecked.length > 0) log?.(`after a rename: not checked within ${Math.round(limitMs / 100) / 10}s: ${check.unchecked.join(", ")}`);
   if (check.broken) lines.push("  the build may be broken: fix these errors; the rename was not undone");
   else if (check.unchecked.length === 0 && check.failed.length === 0) lines.push("  no errors");
-  if (check.unchecked.length > 0) lines.push(`  not checked within ${Math.round(limitMs / 100) / 10}s: ${check.unchecked.join(", ")}`);
+  if (check.failed.length > 0 || check.unchecked.length > 0) lines.push(`  ${check.unchecked.length > 0 ? `not every file was checked within ${Math.round(limitMs / 100) / 10}s` : `${plural(check.failed.length, "file")} could not be checked`}; see the pi-cpp-lsp log`);
   return lines;
 }
 
@@ -343,12 +350,12 @@ export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd
       for (const entry of planned) {
         let noteLines = notes.get(entry.file)!;
         const profile = check ? toolchain?.gapProfileFor(entry.file) : undefined;
-        if (check && profile && check.targets.some(target => target.target === profile.target)) noteLines = changedFileLines(entry.file, noteLines, profile, check.results.get(entry.file), ctx.cwd);
+        if (check && profile && check.targets.some(target => target.target === profile.target)) noteLines = changedFileLines(entry.file, noteLines, profile, check.results.get(entry.file), ctx.cwd, options.log);
         changed.push({ file: entry.file, edits: entry.edits, note: postEditText(noteLines) });
         lines.push(`${cwdDisplayPath(ctx.cwd, entry.file)}: ${plural(entry.edits, "edit")}`);
         if (noteLines.length > 0) lines.push(...noteLines.join("\n").split("\n").map(line => `  ${line}`));
       }
-      if (check) lines.push(...buildCheckLines(check, new Set(files), limitMs, ctx.cwd));
+      if (check) lines.push(...buildCheckLines(check, new Set(files), limitMs, ctx.cwd, options.log));
       const drift = await project.reportPoint().catch(() => undefined);
       if (drift) lines.push(drift);
       return { content: [{ type: "text" as const, text: bounded(lines.join("\n")) }], details: { ...base, changed, drift, ...(check ? { buildBroken: check.broken, unchecked: check.unchecked, uncheckable: check.failed } : {}) } };

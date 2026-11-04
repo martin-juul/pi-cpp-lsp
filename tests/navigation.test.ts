@@ -9,18 +9,17 @@ import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-c
 import { ProjectService } from "../extensions/lib/project/session.ts";
 import type { ProjectModel } from "../extensions/lib/project/model.ts";
 import { registerClangdTools, type ClangdToolOptions } from "../extensions/lib/clangd.ts";
-import { registerNavigationTools, type NavigationOptions } from "../extensions/lib/navigation.ts";
-import type { TargetProfile } from "../extensions/lib/toolchain.ts";
+import { registerNavigationTools } from "../extensions/lib/navigation.ts";
 
 const mock = resolve("tests/fixtures/mock-clangd.mjs");
 
 /** The clangd and navigation tools on a fake ExtensionAPI, sharing one managed connection as index.ts wires them. */
-function register(options: ClangdToolOptions, navigation?: NavigationOptions) {
+function register(options: ClangdToolOptions) {
   const tools = new Map<string, any>();
   const handlers = new Map<string, ((event: any, ctx: any) => unknown)[]>();
   const api = { registerTool: (tool: any) => tools.set(tool.name, tool), on: (name: string, handler: any) => handlers.set(name, [...(handlers.get(name) ?? []), handler]) };
   const managed = registerClangdTools(api as unknown as ExtensionAPI, options);
-  registerNavigationTools(api as unknown as ExtensionAPI, managed, navigation);
+  registerNavigationTools(api as unknown as ExtensionAPI, managed);
   const emit = async (name: string, event: any = {}) => { for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, {}); };
   return { tools, managed, emit };
 }
@@ -45,7 +44,7 @@ async function until(check: () => boolean, ms = 2000) {
 // Mock clangd: index state, truncation, unsupported methods
 
 /** A managed mock connection whose project model is ready from the start and whose first source is `text`. */
-async function managedMock(t: any, text: string, navigation?: NavigationOptions) {
+async function managedMock(t: any, text: string) {
   const cwd = await mkdtemp(join(tmpdir(), "pi-nav-mock-"));
   const source = join(cwd, "main.cpp");
   const buildDir = join(cwd, "managed");
@@ -54,7 +53,7 @@ async function managedMock(t: any, text: string, navigation?: NavigationOptions)
   await writeFile(join(buildDir, "compile_commands.json"), "[]");
   const model = { sourceRoot: cwd, buildDir, targets: [{ isProjectTarget: true, sources: [{ path: source, isGenerated: false, language: "CXX" }] }] } as unknown as ProjectModel;
   const project = { model, onModelChange: () => () => {} } as unknown as ProjectService;
-  const registered = register({ command: process.execPath, args: [mock], timeoutMs: 1000, getProject: () => project }, navigation);
+  const registered = register({ command: process.execPath, args: [mock], timeoutMs: 1000, getProject: () => project });
   t.after(async () => { await registered.emit("session_shutdown"); await rm(cwd, { recursive: true, force: true }); });
   await registered.emit("session_start");
   return { ...registered, cwd, source, call: caller(registered.tools, cwd) };
@@ -114,31 +113,6 @@ test("without a managed project the tools explain that the CMake model is needed
   const both = await call("cpp_symbols", { query: "x", file: "main.cpp" });
   assert.equal(both.isError, true);
   assert.match(both.text, /either query or file/);
-});
-
-/** A measured target whose build compiler supports `clangdLacks`, which clangd does not. */
-function gapProfile(target: string, clangdLacks: string[]): TargetProfile {
-  return { target, standard: 26, compiler: "g++ 16", family: "gcc", available: ["constexpr", ...clangdLacks], needsFlag: {}, clangdLacks, gap: true };
-}
-
-test("in a project with gap targets, navigation results end with a note naming the features clangd lacks, after the index note", async t => {
-  const gaps = [gapProfile("app", ["reflection"]), gapProfile("core", ["contracts", "reflection"])];
-  const h = await managedMock(t, "REFS 1\n", { gaps: () => gaps });
-  const references = await h.call("cpp_references", { file: "main.cpp", line: 1, column: 5 });
-  assert.equal(references.isError, false, references.text);
-  const lines = references.text.split("\n");
-  assert.equal(lines[0], `${h.source}:1:5`);
-  assert.equal(lines[1], "[index not started; results may be incomplete]");
-  assert.equal(lines[2], "[clangd lacks static reflection, contracts, which the build compiler supports; usages in code that uses them may be missing]");
-  assert.equal(lines.length, 3);
-});
-
-test("without gap targets navigation output is unchanged", async t => {
-  const expected = (source: string) => `${source}:1:5\n[index not started; results may be incomplete]`;
-  const none = await managedMock(t, "REFS 1\n", { gaps: () => [] });
-  assert.equal((await none.call("cpp_references", { file: "main.cpp", line: 1, column: 5 })).text, expected(none.source));
-  const unwired = await managedMock(t, "REFS 1\n");
-  assert.equal((await unwired.call("cpp_references", { file: "main.cpp", line: 1, column: 5 })).text, expected(unwired.source));
 });
 
 // ---------------------------------------------------------------------------

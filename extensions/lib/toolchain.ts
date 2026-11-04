@@ -4,6 +4,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { ClangdConnection, type ClangdOptions } from "./clangd.ts";
 import { loadCompilationDatabase, probeInvocation, type CompilationEntry } from "./compdb.ts";
 import type { Exec } from "./project/configure.ts";
+import type { Log } from "./log.ts";
 import { oneLine } from "./output.ts";
 import { bestRealPath, isWithin, ownersOf, standardRank, type ProjectModel } from "./project/model.ts";
 
@@ -39,9 +40,8 @@ const language = (id: string, label: string, macro: string | undefined, min: num
 const library = (id: string, label: string, macro: string, min: number, extra: Partial<Entry> = {}): Entry => ({ id, label, kind: "library", macro, min, ...extra });
 const of = (standard: Feature["standard"], entries: Entry[]): Feature[] => entries.map(entry => ({ standard, ...entry }));
 
-// A feature clangd can never match would put a note on every result of every such project, so it
-// is not listed: clang leaves __cpp_nontype_template_args at its C++17 value although it accepts
-// class-type template arguments, and clang has no std::float16_t, which GCC offers from C++23.
+// Clang leaves __cpp_nontype_template_args at its C++17 value although it accepts class-type
+// template arguments, so that feature cannot be detected and is not listed.
 export const FEATURES: readonly Feature[] = [
   // C++11 library additions predate the library feature-test macros, so C++11 lists language features only.
   ...of(11, [
@@ -143,6 +143,7 @@ export const FEATURES: readonly Feature[] = [
     language("size_t_suffix", "the uz literal suffix", "__cpp_size_t_suffix", 202011),
     language("named_character_escapes", "named character escapes", "__cpp_named_character_escapes", 202207),
     language("implicit_move", "simpler implicit move", "__cpp_implicit_move", 202207),
+    language("float16", "std::float16_t", "__STDCPP_FLOAT16_T__", 1),
     language("assume", "[[assume]]", undefined, undefined, { alternative: "defined(__has_cpp_attribute) && __has_cpp_attribute(assume) >= 202207L" }),
     library("expected", "std::expected", "__cpp_lib_expected", 202211),
     library("print", "std::print", "__cpp_lib_print", 202207),
@@ -398,6 +399,8 @@ export interface ToolchainServiceOptions {
   clangd?: ClangdOptions;
   /** Bound for one clangd probe. */
   clangdTimeoutMs?: number;
+  /** Where measurement failures and the features clangd lacks are recorded. */
+  log?: Log;
 }
 
 /** The parts of the project service the toolchain service follows. */
@@ -564,8 +567,10 @@ export class ToolchainService {
     const controller = new AbortController();
     this.controller = controller;
     const run = this.measure(model, compileDatabase, controller.signal).then(profiles => {
-      if (generation === this.generation && profiles) this.current = { model, profiles };
-    }, () => {});
+      if (generation !== this.generation || !profiles) return;
+      this.current = { model, profiles };
+      for (const profile of profiles) this.record(profile);
+    }, error => this.options.log?.(`C++ feature measurement failed: ${oneLine(String(error instanceof Error ? error.message : error))}`));
     this.running = run;
     void run.finally(() => { if (this.running === run) this.running = undefined; });
   }
@@ -614,6 +619,15 @@ export class ToolchainService {
     if (signal.aborted) return undefined;
     const byKey = new Map(keys.map((key, index) => [key, results[index]!]));
     return targets.map(target => targetProfile(target.name, catalogStandard(target.cxxStandard)!, (targetGroups.get(target.name) ?? []).map(key => byKey.get(key)!)));
+  }
+
+  /** Logs what could not be measured and where clangd is behind, once per measurement. */
+  private record(profile: TargetProfile): void {
+    const log = this.options.log;
+    if (!log) return;
+    if (profile.error) log(`target ${profile.target}: the build compiler could not be measured: ${oneLine(profile.error)}`);
+    else if (profile.clangdError) log(`target ${profile.target}: clangd could not be measured: ${oneLine(profile.clangdError)}`);
+    else if (profile.gap) log(`target ${profile.target} (${profile.compiler ?? "build compiler"}): clangd lacks ${featureLabels(profile.clangdLacks)}; clangd errors in its files are checked with the build compiler, and clangd's index may miss uses in code that uses those features`);
   }
 
   private detach(): void {

@@ -6,6 +6,7 @@ import { plural } from "./output.ts";
 import type { Exec } from "./project/configure.ts";
 import type { ProjectService } from "./project/session.ts";
 import { featureLabels, type TargetProfile, type ToolchainService, HEADER_EXTENSIONS } from "./toolchain.ts";
+import type { Log } from "./log.ts";
 
 /** How long a write or edit waits for clangd's diagnostics at the synced version (KTD13 step 4). */
 export const DIAGNOSTICS_WAIT_MS = 3_000;
@@ -59,6 +60,8 @@ export interface PostEditOptions {
    * compiler supports features clangd lacks, that compiler checks the file instead.
    */
   toolchain?: Pick<ToolchainService, "gapProfileFor">;
+  /** Where a compiler check that could not run is recorded. */
+  log?: Log;
 }
 
 type PostEditClangd = { connection(): Promise<ClangdConnection | undefined> };
@@ -286,18 +289,21 @@ async function verdict(file: string, clangd: { lines: string[]; errors: number }
   const profile = clangd.errors > 0 ? options.toolchain?.gapProfileFor(file) : undefined;
   if (!profile) return clangd.lines;
   const check = await checkWithCompiler(file, profile, { exec: options.exec, cwd: options.cwd, buildDir: options.project?.model?.buildDir });
-  if (!check.ok) return [...clangd.lines, uncheckedWarning(profile, check.reason)];
+  if (!check.ok) {
+    options.log?.(uncheckedEntry(file, profile, check.reason));
+    return clangd.lines;
+  }
   return [...renderCompilerProblems(check.problems, options.cwd), checkedBy(profile)];
 }
 
 /** The line that says the build compiler, not clangd, judged a file. */
 export function checkedBy(profile: TargetProfile): string {
-  return `checked by ${profile.compiler ?? "the build compiler"}; clangd lacks ${featureLabels(profile.clangdLacks)}`;
+  return `checked by ${profile.compiler ?? "the build compiler"}`;
 }
 
-/** The line kept beside clangd's diagnostics when the build compiler could not judge a file. */
-export function uncheckedWarning(profile: TargetProfile, reason: string): string {
-  return `warning: clangd lacks ${featureLabels(profile.clangdLacks)}, so errors involving them may be false; ${profile.compiler ?? "the build compiler"} could not check the file: ${reason}`;
+/** The log entry for a file the build compiler could not judge; clangd's diagnostics stand for it. */
+export function uncheckedEntry(file: string, profile: TargetProfile, reason: string): string {
+  return `${file}: ${profile.compiler ?? "the build compiler"} could not check it, so clangd's diagnostics stand (clangd lacks ${featureLabels(profile.clangdLacks)}): ${reason}`;
 }
 
 /**

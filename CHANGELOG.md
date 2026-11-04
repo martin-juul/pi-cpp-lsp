@@ -11,14 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - C++ feature lists: for every target on C++11 or newer, the extension measures which C++11 to C++26 features the build compiler supports with the target's own compile command, and which ones clangd supports. The session briefing lists them per group of targets: the available features by standard, the features that need a flag such as GCC's `-freflection`, and the features clangd lacks.
-- When clangd reports errors on an edited file in a target whose build compiler supports features clangd lacks, the build compiler checks the file and its diagnostics replace clangd's in the post-edit note. If the compiler cannot check the file within 15 seconds, the note keeps clangd's diagnostics with a warning that some may be false.
+- When clangd reports errors on an edited file in a target whose build compiler supports features clangd lacks, the build compiler checks the file and its diagnostics replace clangd's in the post-edit note. If the compiler cannot check the file within 15 seconds, the note keeps clangd's diagnostics.
 - In such projects, `cpp_rename` syntax-checks the affected targets with the build compiler after renaming (within 60 seconds) and reports errors from uses clangd's index missed. The rename is not undone.
-- Navigation results in such projects say uses in code clangd cannot parse may be missing; `cpp_hover`, `cpp_definition` and `cpp_check` say clang-based tools lack those features.
+- A per-project log, `pi-cpp-lsp.log` in the managed cache, records what the extension could not do: features clangd lacks, targets it could not measure, and files the compiler could not check. Tool results stay free of notes that would repeat on every call.
 - `/cpp-setup` compares, per standard, the C++ features of the default compiler (`$CXX`, else `c++`) and clangd.
 
 ### Changed
 
-- **Behavior change:** the post-edit note can now come from the build compiler instead of clangd, the briefing has a C++ features section, and navigation, rename, hover, definition and `cpp_check` results can carry an extra line about features clangd lacks.
+- **Behavior change:** the post-edit note can now come from the build compiler instead of clangd, the briefing has a C++ features section, and a rename in such projects ends with a build check.
 
 ### Fixed
 

@@ -7,8 +7,6 @@ import { resolve, extname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ProjectModel } from "./project/model.ts";
 import type { ProjectService } from "./project/session.ts";
-import { clangToolsGapNote } from "./gap-notes.ts";
-import type { TargetProfile } from "./toolchain.ts";
 
 const MAX_MESSAGE = 16 * 1024 * 1024;
 const MAX_OUTPUT = 24_000;
@@ -507,8 +505,6 @@ export function location(value: any) {
 export interface ClangdToolOptions extends ClangdOptions {
   /** The session's project service; with a ready model, calls without `build_dir` use the managed connection (KTD16). */
   getProject?: () => ManagedProject | undefined;
-  /** The gap profile of the target a file belongs to; results for such a file name the features clang-based tools lack. */
-  gapProfileFor?: (file: string) => TargetProfile | undefined;
 }
 
 /**
@@ -517,7 +513,7 @@ export interface ClangdToolOptions extends ClangdOptions {
  * otherwise the managed connection attaches at the next agent start or tool call.
  */
 export function registerClangdTools(pi: ExtensionAPI, toolOptions: ClangdToolOptions = {}): ManagedClangd {
-  const { getProject, gapProfileFor, ...options } = toolOptions;
+  const { getProject, ...options } = toolOptions;
   const connections = new Map<string, ClangdConnection>();
   const managed = new ManagedClangd(options);
   const follow = () => { if (getProject) managed.attach(getProject()); };
@@ -555,8 +551,7 @@ export function registerClangdTools(pi: ExtensionAPI, toolOptions: ClangdToolOpt
           let connection = buildDir === undefined ? await waitFor(managed.connection(), signal) : undefined;
           // The result names the managed compile database it used (KTD16).
           const used = connection ? { ...base, build_dir: connection.buildDir, managed: true } : base;
-          const gapNote = clangToolsGapNote(gapProfileFor?.(file));
-          const note = (connection ? `\n[compile database: ${connection.buildDir} (managed)]` : "") + (gapNote ? `\n${gapNote}` : "");
+          const note = connection ? `\n[compile database: ${connection.buildDir} (managed)]` : "";
           if (!connection) {
             const key = JSON.stringify([resolve(ctx.cwd), buildDir]);
             connection = connections.get(key);
