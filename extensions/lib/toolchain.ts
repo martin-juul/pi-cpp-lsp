@@ -39,8 +39,9 @@ const language = (id: string, label: string, macro: string | undefined, min: num
 const library = (id: string, label: string, macro: string, min: number, extra: Partial<Entry> = {}): Entry => ({ id, label, kind: "library", macro, min, ...extra });
 const of = (standard: Feature["standard"], entries: Entry[]): Feature[] => entries.map(entry => ({ standard, ...entry }));
 
-// Clang leaves __cpp_nontype_template_args at its C++17 value although it accepts class-type
-// template arguments, so that feature is not listed: it would make every GCC target look ahead.
+// A feature clangd can never match would put a note on every result of every such project, so it
+// is not listed: clang leaves __cpp_nontype_template_args at its C++17 value although it accepts
+// class-type template arguments, and clang has no std::float16_t, which GCC offers from C++23.
 export const FEATURES: readonly Feature[] = [
   // C++11 library additions predate the library feature-test macros, so C++11 lists language features only.
   ...of(11, [
@@ -143,7 +144,6 @@ export const FEATURES: readonly Feature[] = [
     language("named_character_escapes", "named character escapes", "__cpp_named_character_escapes", 202207),
     language("implicit_move", "simpler implicit move", "__cpp_implicit_move", 202207),
     language("assume", "[[assume]]", undefined, undefined, { alternative: "defined(__has_cpp_attribute) && __has_cpp_attribute(assume) >= 202207L" }),
-    language("float16", "std::float16_t", "__STDCPP_FLOAT16_T__", 1),
     library("expected", "std::expected", "__cpp_lib_expected", 202211),
     library("print", "std::print", "__cpp_lib_print", 202207),
     library("mdspan", "std::mdspan", "__cpp_lib_mdspan", 202207),
