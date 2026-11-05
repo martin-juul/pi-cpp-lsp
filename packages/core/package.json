@@ -1,6 +1,6 @@
 {
   "name": "@pi-cpp-lsp/core",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Harness-independent C/C++ support shared by pi-cpp-lsp and the cpp-lsp Claude Code plugin: CMake project model and drift, managed clangd, navigation, rename, build tools and C++ feature detection",
   "license": "Apache-2.0",

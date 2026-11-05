@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-05
+
 ### Added
 
 - A Claude Code plugin, `cpp-lsp`, installable from this repository as a marketplace (`claude plugin marketplace add martin-juul/pi-cpp-lsp`). It brings the project briefing, post-edit and drift notes, every `cpp_*` tool, and `/cpp-lsp:cpp-setup` and `/cpp-lsp:cpp-preset` to Claude Code. It runs nothing in a CMake project until `/cpp-lsp:trust` enables it there.
@@ -82,7 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/cpp-setup` toolchain check command and `cpp-setup` skill.
 - C++ guidelines injected into the system prompt.
 
-[Unreleased]: https://github.com/martin-juul/pi-cpp-lsp/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/martin-juul/pi-cpp-lsp/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.2.0...v2.0.0
 [1.2.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/martin-juul/pi-cpp-lsp/compare/v1.0.0...v1.1.0
