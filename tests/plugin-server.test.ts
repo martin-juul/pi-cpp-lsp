@@ -12,7 +12,7 @@ import type { Exec, ExecOptions, ExecResult } from "../packages/core/src/exec.ts
 import { projectCacheDir, readProjectState } from "../packages/core/src/project/root.ts";
 import { STANDARD_GUIDELINE } from "../packages/core/src/session.ts";
 import { cppTools } from "../packages/core/src/tools.ts";
-import { CppPlugin, createServer, type PluginOptions } from "../plugins/cpp-lsp/src/server.ts";
+import { CppPlugin, createServer, SERVER_VERSION, type PluginOptions } from "../plugins/cpp-lsp/src/server.ts";
 import { addTrusted, trustFile } from "../plugins/cpp-lsp/src/trust.ts";
 
 // Feature probes and caches stay private to this file, so test files running at the same time
@@ -404,21 +404,28 @@ test("the plugin's hooks call its own server's hook tools, and its manifest name
   const servers = Object.keys(read(".mcp.json").mcpServers);
   assert.deepEqual(servers, ["core"]);
   const wiring: string[] = [];
-  for (const [event, groups] of Object.entries(read("hooks/hooks.json").hooks as Record<string, { matcher?: string; hooks: { server: string; tool: string; input: object }[] }[]>)) {
+  for (const [event, groups] of Object.entries(read("hooks/hooks.json").hooks as Record<string, { matcher?: string; hooks: { server: string; tool: string; input: object; timeout: number }[] }[]>)) {
     for (const group of groups) {
       for (const hook of group.hooks) {
         assert.equal(hook.server, `plugin:${name}:core`);
-        wiring.push(`${event} ${group.matcher ?? "*"} ${hook.tool} ${JSON.stringify(hook.input)}`);
+        wiring.push(`${event} ${group.matcher ?? "*"} ${hook.tool} ${JSON.stringify(hook.input)} ${hook.timeout}s`);
       }
     }
   }
   assert.deepEqual(wiring, [
-    "UserPromptSubmit * cpp_hook_prompt {}",
-    'PostToolUse Write|Edit|MultiEdit cpp_hook_post_edit {"file_path":"${tool_input.file_path}"}',
-    "PostToolUse Bash cpp_hook_after_shell {}",
+    "UserPromptSubmit * cpp_hook_prompt {} 30s",
+    // Above the post-edit note's own bounds together: report point, clang-format, clangd, compiler check.
+    'PostToolUse Write|Edit|MultiEdit cpp_hook_post_edit {"file_path":"${tool_input.file_path}"} 90s',
+    "PostToolUse Bash cpp_hook_after_shell {} 30s",
     // mcp_tool hooks cannot run at startup, before the server is connected, and report an error there.
-    'SessionStart clear|compact|resume cpp_hook_session_start {"source":"${source}"}',
+    'SessionStart clear|compact|resume cpp_hook_session_start {"source":"${source}"} 10s',
   ]);
+  // One version, written in the plugin manifest: the server, the package and the marketplace entry agree.
+  const version = read(".claude-plugin/plugin.json").version;
+  assert.equal(SERVER_VERSION, version);
+  assert.equal(read("package.json").version, version);
+  const listing = JSON.parse(readFileSync(resolve(here, "..", ".claude-plugin", "marketplace.json"), "utf8"));
+  assert.equal(listing.plugins.find((entry: { name: string }) => entry.name === name).version, version);
   freshCache();
   const s = await connect(t, { projectDir: realpathSync(mkdtempSync(join(tmpdir(), "cpp-lsp-plain-"))), exec: recordingExec().exec });
   const { tools } = await s.client.listTools();
@@ -438,6 +445,7 @@ test("the committed server bundle serves the tools over stdio and exits when Cla
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map(tool => tool.name), [...TOOLS_2_0_0, "cpp_preset", ...HOOK_TOOLS]);
   assert.match(client.getInstructions()!, /C\/C\+\+ tools from the cpp-lsp plugin/);
+  assert.equal(client.getServerVersion()?.version, SERVER_VERSION);
   const pid = transport.pid!;
   await client.close();
   const deadline = Date.now() + 10_000;

@@ -1,26 +1,38 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
+// The plugin manifest is the one place the plugin's version is written.
+import manifest from "../.claude-plugin/plugin.json" with { type: "json" };
 import type { ClangdOptions } from "../../../packages/core/src/clangd.ts";
 import type { PostEditOptions } from "../../../packages/core/src/diagnostics.ts";
 import type { Exec } from "../../../packages/core/src/exec.ts";
 import { projectLog } from "../../../packages/core/src/log.ts";
 import { findSourceRoot } from "../../../packages/core/src/project/root.ts";
 import { presetCommand } from "../../../packages/core/src/project/tools.ts";
-import { CppSession, STANDARD_GUIDELINE } from "../../../packages/core/src/session.ts";
+import { CppSession, FIXED_GUIDELINES, STANDARD_GUIDELINE } from "../../../packages/core/src/session.ts";
 import type { ToolchainServiceOptions } from "../../../packages/core/src/toolchain.ts";
 import { cppTools, defineTool, type CppTools, type ToolSpec } from "../../../packages/core/src/tools.ts";
 import { HOOK_TOOLS, runHook } from "./hooks.ts";
-import { errorMessage, isEntry, nodeExec, TRUST_COMMAND, UNTRUSTED, usePluginWording } from "./runtime.ts";
+import { errorMessage, isEntry, nodeExec, stopRunning, TRUST_COMMAND, UNTRUSTED, usePluginWording } from "./runtime.ts";
 import { isTrusted } from "./trust.ts";
 
 export const SERVER_NAME = "cpp-lsp";
-export const SERVER_VERSION = "1.0.0";
+export const SERVER_VERSION: string = manifest.version;
 
 /** How long the check for Claude Code's own clangd-lsp plugin may take. */
 const CLAUDE_LIST_TIMEOUT_MS = 10_000;
+/** How long the MCP handshake waits for the session to tell a CMake project from a plain one. */
+const HANDSHAKE_WAIT_MS = 2_000;
+
+/** The value of `promise`, or undefined when it takes longer than `ms`. */
+function within<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  const stop = new AbortController();
+  const timeout = sleep(ms, undefined, { signal: stop.signal }).catch(() => undefined);
+  return Promise.race([promise, timeout]).finally(() => stop.abort());
+}
 
 export interface PluginOptions {
   /** The Claude Code project directory; the CMake root is searched from here. */
@@ -143,7 +155,10 @@ export class CppPlugin {
     const session = this.current();
     // A CMake project the user has not enabled is no plain directory: telling Claude to make
     // compile_commands.json there would steer it into running the project's CMake by hand.
-    const guidelines = this.trusted || this.root === undefined ? await session.guidelines() : [STANDARD_GUIDELINE];
+    // Otherwise the session decides once the cmake probe answers; the handshake waits for it only
+    // briefly, and then goes by whether there is a CMake root.
+    const byRoot = this.root === undefined ? FIXED_GUIDELINES : [STANDARD_GUIDELINE];
+    const guidelines = this.trusted ? await within(session.guidelines(), HANDSHAKE_WAIT_MS) ?? byRoot : byRoot;
     const names = this.tools.specs.map(spec => spec.name).join(", ");
     return [
       ...guidelines,
@@ -262,6 +277,8 @@ async function main(): Promise<void> {
     if (closing) return;
     closing = true;
     await Promise.race([plugin.dispose(), new Promise(done => setTimeout(done, 5000).unref())]);
+    // Disposing only asks a running configure to stop; make sure it and its build tools are gone.
+    await stopRunning(2000);
     process.exit(0);
   };
   server.onclose = () => void shutdown();

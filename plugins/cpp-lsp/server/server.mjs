@@ -7255,6 +7255,9 @@ var require_dist = __commonJS({
   }
 });
 
+// src/server.ts
+import { setTimeout as sleep3 } from "node:timers/promises";
+
 // ../../node_modules/zod/v4/core/util.js
 var util_exports = {};
 __export(util_exports, {
@@ -25241,6 +25244,21 @@ __export(value_exports, {
   Repair: () => Repair
 });
 
+// .claude-plugin/plugin.json
+var plugin_default = {
+  name: "cpp-lsp",
+  version: "1.0.0",
+  description: "C/C++ support for Claude Code: a CMake project briefing, post-edit format and diagnostics notes with the build compiler's check, CMake drift detection, and clangd-backed navigation, rename, build and test tools",
+  author: {
+    name: "Martin Juul Christiansen",
+    email: "code@juul.xyz"
+  },
+  homepage: "https://github.com/martin-juul/pi-cpp-lsp#readme",
+  repository: "https://github.com/martin-juul/pi-cpp-lsp",
+  license: "Apache-2.0",
+  keywords: ["c", "cpp", "c++", "clangd", "cmake", "lsp", "clang-format", "clang-tidy"]
+};
+
 // ../../packages/core/src/log.ts
 import { appendFileSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, statSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join2 } from "node:path";
@@ -28387,16 +28405,16 @@ var ToolchainService = class {
   /** Resolves once no measurement is running, or after `timeoutMs`. */
   async settled(timeoutMs = Infinity) {
     while (this.running) {
-      const running = this.running;
+      const running2 = this.running;
       if (!Number.isFinite(timeoutMs)) {
-        await running;
+        await running2;
         continue;
       }
       let timer;
       const expired = new Promise((done) => {
         timer = setTimeout(() => done("expired"), Math.max(0, timeoutMs));
       });
-      const outcome = await Promise.race([running.then(() => "done"), expired]);
+      const outcome = await Promise.race([running2.then(() => "done"), expired]);
       clearTimeout(timer);
       if (outcome === "expired") return;
     }
@@ -29802,6 +29820,7 @@ async function runHook(plugin, name, args) {
 // src/runtime.ts
 import { spawn as spawn2 } from "node:child_process";
 import { realpathSync as realpathSync5 } from "node:fs";
+import { setTimeout as sleep2 } from "node:timers/promises";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 var TRUST_COMMAND = "/cpp-lsp:trust";
 var UNTRUSTED2 = {
@@ -29826,20 +29845,55 @@ function isEntry2(moduleUrl) {
   }
 }
 var EXIT_STDIO_GRACE_MS = 100;
+var KILL_GRACE_MS = 5e3;
+var running = /* @__PURE__ */ new Set();
+async function stopRunning(graceMs = KILL_GRACE_MS) {
+  const left = [...running];
+  if (left.length === 0) return;
+  for (const program of left) program.signal("SIGTERM");
+  const stop = new AbortController();
+  await Promise.race([
+    Promise.all(left.map((program) => program.exited)),
+    sleep2(graceMs, void 0, { signal: stop.signal }).catch(() => void 0)
+  ]).finally(() => stop.abort());
+  for (const program of running) program.signal("SIGKILL");
+}
 var nodeExec = (command, args, options = {}) => new Promise((resolve14) => {
   let stdout = "", stderr = "", killed = false;
   let timer;
   let idle;
   let exitCode = null;
   let exited = false, stdoutEnded = false, stderrEnded = false;
-  const child = spawn2(command, args, { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn2(command, args, { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], detached: true });
+  let markExited;
+  const program = {
+    signal(signal) {
+      if (child.pid === void 0) return;
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        try {
+          child.kill(signal);
+        } catch {
+        }
+      }
+    },
+    exited: new Promise((done2) => {
+      markExited = done2;
+    })
+  };
+  if (child.pid !== void 0) running.add(program);
+  const gone = () => {
+    running.delete(program);
+    markExited();
+  };
   const kill = () => {
     if (killed) return;
     killed = true;
-    child.kill("SIGTERM");
+    program.signal("SIGTERM");
     setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    }, 5e3).unref();
+      if (child.exitCode === null && child.signalCode === null) program.signal("SIGKILL");
+    }, KILL_GRACE_MS).unref();
   };
   let done = false;
   const finish = (code) => {
@@ -29879,8 +29933,12 @@ var nodeExec = (command, args, options = {}) => new Promise((resolve14) => {
     stderrEnded = true;
     finishIfDrained();
   });
-  child.on("error", () => finish(127));
+  child.on("error", () => {
+    gone();
+    finish(127);
+  });
   child.once("exit", (code) => {
+    gone();
     exited = true;
     exitCode = code;
     finishIfDrained();
@@ -29909,8 +29967,14 @@ function isTrusted(dataDir, root) {
 
 // src/server.ts
 var SERVER_NAME = "cpp-lsp";
-var SERVER_VERSION = "1.0.0";
+var SERVER_VERSION = plugin_default.version;
 var CLAUDE_LIST_TIMEOUT_MS = 1e4;
+var HANDSHAKE_WAIT_MS = 2e3;
+function within2(promise, ms) {
+  const stop = new AbortController();
+  const timeout = sleep3(ms, void 0, { signal: stop.signal }).catch(() => void 0);
+  return Promise.race([promise, timeout]).finally(() => stop.abort());
+}
 var CppPlugin = class {
   projectDir;
   tools;
@@ -30000,7 +30064,8 @@ var CppPlugin = class {
   /** The guidance for the whole session, sent once in the MCP handshake. */
   async instructions() {
     const session = this.current();
-    const guidelines = this.trusted || this.root === void 0 ? await session.guidelines() : [STANDARD_GUIDELINE];
+    const byRoot = this.root === void 0 ? FIXED_GUIDELINES : [STANDARD_GUIDELINE];
+    const guidelines = this.trusted ? await within2(session.guidelines(), HANDSHAKE_WAIT_MS) ?? byRoot : byRoot;
     const names = this.tools.specs.map((spec) => spec.name).join(", ");
     return [
       ...guidelines,
@@ -30103,6 +30168,7 @@ async function main() {
     if (closing) return;
     closing = true;
     await Promise.race([plugin.dispose(), new Promise((done) => setTimeout(done, 5e3).unref())]);
+    await stopRunning(2e3);
     process.exit(0);
   };
   server.onclose = () => void shutdown();

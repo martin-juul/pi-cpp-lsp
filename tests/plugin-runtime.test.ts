@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { nodeExec } from "../plugins/cpp-lsp/src/runtime.ts";
+import { nodeExec, stopRunning } from "../plugins/cpp-lsp/src/runtime.ts";
 
 const sh = (script: string) => ["-c", script];
 
@@ -19,12 +19,35 @@ test("nodeExec ends a run whose background process keeps the output pipe open", 
   assert.deepEqual(result, { stdout: "started\n", stderr: "", code: 0, killed: false });
 });
 
-test("nodeExec stops a program at its timeout even when a background process holds the pipe", async () => {
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+async function gone(pid: number): Promise<boolean> {
+  for (const deadline = Date.now() + 2000; Date.now() < deadline; await new Promise(done => setTimeout(done, 20))) {
+    if (!alive(pid)) return true;
+  }
+  return false;
+}
+
+test("nodeExec stops a program at its timeout, together with the processes it started", async () => {
   const started = Date.now();
-  const result = await nodeExec("sh", sh("sleep 5 & echo started; sleep 5"), { timeout: 300 });
+  const result = await nodeExec("sh", sh("sleep 30 & echo $!; sleep 30"), { timeout: 300 });
   assert.ok(Date.now() - started < 2000, `took ${Date.now() - started} ms`);
   assert.equal(result.killed, true);
-  assert.equal(result.stdout, "started\n");
+  const background = Number(result.stdout.trim());
+  assert.ok(background > 0, result.stdout);
+  assert.ok(await gone(background), "the background sleep was stopped with its parent");
+});
+
+test("stopRunning stops every running program, with SIGKILL for one that ignores SIGTERM", async () => {
+  const stubborn = nodeExec("sh", sh("trap '' TERM; sleep 30"));
+  const plain = nodeExec("sleep", ["30"]);
+  await new Promise(done => setTimeout(done, 100));
+  const started = Date.now();
+  await stopRunning(300);
+  const results = await Promise.all([stubborn, plain]);
+  assert.ok(Date.now() - started < 2000, `took ${Date.now() - started} ms`);
+  for (const result of results) assert.notEqual(result.code, 0);
+  await stopRunning(300);
 });
 
 test("nodeExec stops a program when the call is aborted", async () => {

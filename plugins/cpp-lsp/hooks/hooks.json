@@ -12,13 +12,13 @@
       {
         "matcher": "Write|Edit|MultiEdit",
         "hooks": [
-          { "type": "mcp_tool", "server": "plugin:cpp-lsp:core", "tool": "cpp_hook_post_edit", "input": { "file_path": "${tool_input.file_path}" } }
+          { "type": "mcp_tool", "server": "plugin:cpp-lsp:core", "tool": "cpp_hook_post_edit", "input": { "file_path": "${tool_input.file_path}" }, "timeout": 90 }
         ]
       },
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "mcp_tool", "server": "plugin:cpp-lsp:core", "tool": "cpp_hook_after_shell", "input": {} }
+          { "type": "mcp_tool", "server": "plugin:cpp-lsp:core", "tool": "cpp_hook_after_shell", "input": {}, "timeout": 30 }
         ]
       }
     ],
@@ -26,7 +26,7 @@
       {
         "matcher": "clear|compact|resume",
         "hooks": [
-          { "type": "mcp_tool", "server": "plugin:cpp-lsp:core", "tool": "cpp_hook_session_start", "input": { "source": "${source}" } }
+          { "type": "mcp_tool", "server": "plugin:cpp-lsp:core", "tool": "cpp_hook_session_start", "input": { "source": "${source}" }, "timeout": 10 }
         ]
       }
     ]

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { Exec, ExecResult } from "../../../packages/core/src/exec.ts";
 import { configureHarness } from "../../../packages/core/src/harness.ts";
@@ -43,9 +44,40 @@ export function isEntry(moduleUrl: string): boolean {
 /** How long the output pipes may stay quiet after the program exits before they are dropped, as in pi. */
 const EXIT_STDIO_GRACE_MS = 100;
 
+/** How long a stopped program has between SIGTERM and SIGKILL. */
+const KILL_GRACE_MS = 5000;
+
+interface Running {
+  /** Signals the program and everything it started. */
+  signal(signal: NodeJS.Signals): void;
+  readonly exited: Promise<void>;
+}
+
+/** The programs nodeExec started that have not exited yet. */
+const running = new Set<Running>();
+
+/**
+ * Stops every program nodeExec still runs: SIGTERM, then SIGKILL to whatever is left after
+ * `graceMs`. The server calls it before it exits, which would otherwise drop the SIGKILL.
+ */
+export async function stopRunning(graceMs = KILL_GRACE_MS): Promise<void> {
+  const left = [...running];
+  if (left.length === 0) return;
+  for (const program of left) program.signal("SIGTERM");
+  const stop = new AbortController();
+  await Promise.race([
+    Promise.all(left.map(program => program.exited)),
+    sleep(graceMs, undefined, { signal: stop.signal }).catch(() => undefined),
+  ]).finally(() => stop.abort());
+  for (const program of running) program.signal("SIGKILL");
+}
+
 /**
  * Runs a program the way pi's exec does: no shell, no stdin, SIGTERM on timeout or abort and SIGKILL
  * five seconds later. A program that cannot start is a failed run, never a thrown error.
+ *
+ * The program runs in its own process group, and the signals go to the whole group, so a cmake or a
+ * test runner that is stopped takes the build tools and processes it started with it.
  *
  * The run ends when the program exits and its output pipes close. A background process the program
  * left running can hold those pipes open indefinitely, so once the program has exited and the pipes
@@ -57,12 +89,27 @@ export const nodeExec: Exec = (command, args, options = {}) => new Promise<ExecR
   let idle: NodeJS.Timeout | undefined;
   let exitCode: number | null = null;
   let exited = false, stdoutEnded = false, stderrEnded = false;
-  const child = spawn(command, args, { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(command, args, { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], detached: true });
+  let markExited!: () => void;
+  const program: Running = {
+    signal(signal) {
+      if (child.pid === undefined) return;
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        // The group is gone; the program itself may still be there.
+        try { child.kill(signal); } catch { /* already gone */ }
+      }
+    },
+    exited: new Promise<void>(done => { markExited = done; }),
+  };
+  if (child.pid !== undefined) running.add(program);
+  const gone = () => { running.delete(program); markExited(); };
   const kill = () => {
     if (killed) return;
     killed = true;
-    child.kill("SIGTERM");
-    setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }, 5000).unref();
+    program.signal("SIGTERM");
+    setTimeout(() => { if (child.exitCode === null && child.signalCode === null) program.signal("SIGKILL"); }, KILL_GRACE_MS).unref();
   };
   let done = false;
   const finish = (code: number) => {
@@ -88,8 +135,9 @@ export const nodeExec: Exec = (command, args, options = {}) => new Promise<ExecR
   child.stderr.on("data", data => { stderr += data; if (exited) armIdle(); });
   child.stdout.once("end", () => { stdoutEnded = true; finishIfDrained(); });
   child.stderr.once("end", () => { stderrEnded = true; finishIfDrained(); });
-  child.on("error", () => finish(127));
+  child.on("error", () => { gone(); finish(127); });
   child.once("exit", code => {
+    gone();
     exited = true;
     exitCode = code;
     finishIfDrained();

@@ -5410,20 +5410,44 @@ function isEntry(moduleUrl) {
   }
 }
 var EXIT_STDIO_GRACE_MS = 100;
+var KILL_GRACE_MS = 5e3;
+var running = /* @__PURE__ */ new Set();
 var nodeExec = (command, args, options = {}) => new Promise((resolve5) => {
   let stdout = "", stderr = "", killed = false;
   let timer;
   let idle;
   let exitCode = null;
   let exited = false, stdoutEnded = false, stderrEnded = false;
-  const child = spawn2(command, args, { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn2(command, args, { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], detached: true });
+  let markExited;
+  const program = {
+    signal(signal) {
+      if (child.pid === void 0) return;
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        try {
+          child.kill(signal);
+        } catch {
+        }
+      }
+    },
+    exited: new Promise((done2) => {
+      markExited = done2;
+    })
+  };
+  if (child.pid !== void 0) running.add(program);
+  const gone = () => {
+    running.delete(program);
+    markExited();
+  };
   const kill = () => {
     if (killed) return;
     killed = true;
-    child.kill("SIGTERM");
+    program.signal("SIGTERM");
     setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    }, 5e3).unref();
+      if (child.exitCode === null && child.signalCode === null) program.signal("SIGKILL");
+    }, KILL_GRACE_MS).unref();
   };
   let done = false;
   const finish = (code) => {
@@ -5463,8 +5487,12 @@ var nodeExec = (command, args, options = {}) => new Promise((resolve5) => {
     stderrEnded = true;
     finishIfDrained();
   });
-  child.on("error", () => finish(127));
+  child.on("error", () => {
+    gone();
+    finish(127);
+  });
   child.once("exit", (code) => {
+    gone();
     exited = true;
     exitCode = code;
     finishIfDrained();

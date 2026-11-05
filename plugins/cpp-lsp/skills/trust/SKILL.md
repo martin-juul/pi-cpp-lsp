@@ -2,7 +2,7 @@
 name: trust
 description: Enable the cpp-lsp plugin for the current CMake project, which lets it configure the project with CMake and run its compiler and clangd.
 disable-model-invocation: true
-allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/server/trust.mjs *)
+allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/server/trust.mjs "${CLAUDE_PROJECT_DIR}" "${CLAUDE_PLUGIN_DATA}")
 ---
 
 # Enable cpp-lsp for this project
