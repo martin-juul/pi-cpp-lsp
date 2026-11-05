@@ -393,7 +393,7 @@ export interface TargetProfile {
 }
 
 export interface ToolchainServiceOptions {
-  /** Runs the compiler probes; pass pi.exec. */
+  /** Runs the compiler probes */
   exec: Exec;
   /** How to start clangd for its probe; defaults to `clangd` on PATH. */
   clangd?: ClangdOptions;
@@ -660,7 +660,7 @@ export async function setupFeatureLines(exec: Exec, options: Pick<ToolchainServi
   const cxx = process.env.CXX || "c++";
   const entry: CompilationEntry = { file: join(tmpdir(), "pi-cpp-lsp-setup.cpp"), directory: tmpdir(), argv: [cxx, `-std=${SETUP_STANDARD}`] };
   const lines: string[] = [];
-  // pi.exec reports a missing program only as a failed run, so look it up first.
+  // The harness's exec reports a missing program only as a failed run, so look it up first.
   const found = (await exec("sh", ["-c", 'command -v "$1"', "sh", cxx], { timeout: 5000 }).catch(() => undefined))?.code === 0;
   const [compiler, clangd] = await Promise.all([
     found ? measureCompiler(entry, exec) : undefined,

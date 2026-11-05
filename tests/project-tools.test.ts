@@ -6,10 +6,10 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Exec } from "../extensions/lib/project/configure.ts";
-import { readProjectState } from "../extensions/lib/project/root.ts";
-import { ProjectService } from "../extensions/lib/project/session.ts";
-import { registerProjectTools } from "../extensions/lib/project/tools.ts";
+import type { Exec } from "../packages/core/src/project/configure.ts";
+import { readProjectState } from "../packages/core/src/project/root.ts";
+import { ProjectService } from "../packages/core/src/project/session.ts";
+import { registerProjectTools } from "../extensions/register.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, "fixtures", "cmake");

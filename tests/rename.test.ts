@@ -7,11 +7,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { cpSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { ProjectService } from "../extensions/lib/project/session.ts";
-import type { ProjectModel } from "../extensions/lib/project/model.ts";
-import type { Exec } from "../extensions/lib/project/configure.ts";
-import { registerClangdTools, type ClangdToolOptions } from "../extensions/lib/clangd.ts";
-import { registerRenameTool, type RenameToolOptions } from "../extensions/lib/rename.ts";
+import { ProjectService } from "../packages/core/src/project/session.ts";
+import type { ProjectModel } from "../packages/core/src/project/model.ts";
+import type { Exec } from "../packages/core/src/project/configure.ts";
+import { registerClangdTools, registerRenameTool, type ClangdToolOptions, type RenameToolOptions } from "../extensions/register.ts";
 
 const mock = resolve("tests/fixtures/mock-clangd.mjs");
 

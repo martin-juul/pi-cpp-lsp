@@ -24,25 +24,34 @@ export const UPDATE_MESSAGE = "cpp-project-update";
 
 const NOTE_PREFIX = "[cpp-lsp]";
 
-/** Why an untrusted CMake project gets no project support, and how to change that (pi's project trust). */
-const UNTRUSTED_REASON = "pi does not trust this project, and configuring it would run the project's CMake code";
-const TRUST_STEPS = "trust the project with /trust and restart pi, or start pi with --approve";
+/** Why an untrusted CMake project gets no project support, and how to change that, in the harness's words. */
+export interface UntrustedWording {
+  /** Completes "<root> is a CMake project, but …". */
+  reason: string;
+  /** Completes "To enable it, …". */
+  steps: string;
+}
+
+const UNTRUSTED: UntrustedWording = {
+  reason: "the project is not trusted, and configuring it would run the project's CMake code",
+  steps: "trust the project and start a new session",
+};
 
 export interface ProjectServiceOptions {
   /** The session's working directory. */
   cwd: string;
-  /** Pass pi.exec. */
   exec: Exec;
   /** Tells the user once why a CMake project gets no project support (KTD18). */
   notify?: (message: string, level: "info" | "warning" | "error") => void;
   /** Report-point wait bound; defaults to REPORT_WAIT_MS. */
   waitMs?: number;
   /**
-   * Whether pi trusts the project (pass ctx.isProjectTrusted() at session start). Configuring runs
-   * the project's CMake code, so an untrusted CMake project gets no project support and runs no
-   * cmake, git or ctest. Defaults to true.
+   * Whether the harness trusts the project. Configuring runs the project's CMake code, so an
+   * untrusted CMake project gets no project support and runs no cmake, git or ctest. Defaults to true.
    */
   trusted?: boolean;
+  /** How the one-time note and cpp_project explain an untrusted project. */
+  untrusted?: UntrustedWording;
   /** The toolchain feature check's state, for the briefing's feature section. */
   toolchain?: () => FeatureState;
 }
@@ -161,10 +170,11 @@ export class ProjectService {
     this.root = findSourceRoot(options.cwd);
     this.nonCmake = this.root === undefined;
     if (this.root !== undefined && options.trusted === false) {
+      const { reason, steps } = options.untrusted ?? UNTRUSTED;
       this.nonCmake = true;
-      this.nonCmakeReason = UNTRUSTED_REASON;
-      this.nonCmakeHint = `To enable it, ${TRUST_STEPS}.`;
-      options.notify?.(`pi-cpp-lsp: ${this.root} is a CMake project, but ${UNTRUSTED_REASON}. Project briefing and drift detection are off for this session; to enable them, ${TRUST_STEPS}.`, "warning");
+      this.nonCmakeReason = reason;
+      this.nonCmakeHint = `To enable it, ${steps}.`;
+      options.notify?.(`pi-cpp-lsp: ${this.root} is a CMake project, but ${reason}. Project briefing and drift detection are off for this session; to enable them, ${steps}.`, "warning");
     }
     this.initialized = this.root === undefined || this.nonCmake ? Promise.resolve() : this.initialize(this.root, options.notify);
   }

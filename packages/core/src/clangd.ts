@@ -1,4 +1,3 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -7,6 +6,7 @@ import { resolve, extname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ProjectModel } from "./project/model.ts";
 import type { ProjectService } from "./project/session.ts";
+import { defineTool, type ToolSpec } from "./tools.ts";
 
 const MAX_MESSAGE = 16 * 1024 * 1024;
 const MAX_OUTPUT = 24_000;
@@ -502,79 +502,66 @@ export function location(value: any) {
   };
 }
 
-export interface ClangdToolOptions extends ClangdOptions {
-  /** The session's project service; with a ready model, calls without `build_dir` use the managed connection (KTD16). */
-  getProject?: () => ManagedProject | undefined;
-}
-
 /**
- * Registers cpp_hover and cpp_definition and returns the session's managed connection for other
- * tools. Register after the handler that creates the project service, so `session_start` sees it;
- * otherwise the managed connection attaches at the next agent start or tool call.
+ * cpp_hover and cpp_definition. Without build_dir they use `managed()`, the session's managed
+ * connection, once its project model is ready; otherwise, and for an explicit build_dir, a connection
+ * of their own started with `options`, which `close` shuts down.
  */
-export function registerClangdTools(pi: ExtensionAPI, toolOptions: ClangdToolOptions = {}): ManagedClangd {
-  const { getProject, ...options } = toolOptions;
+export function clangdToolSpecs(managed: () => Pick<ManagedClangd, "connection"> | undefined, options: ClangdOptions = {}): { specs: ToolSpec[]; close(): Promise<void> } {
   const connections = new Map<string, ClangdConnection>();
-  const managed = new ManagedClangd(options);
-  const follow = () => { if (getProject) managed.attach(getProject()); };
-  pi.on("session_start", async () => { follow(); });
-  pi.on("agent_start", async () => { follow(); });
-  pi.on("session_shutdown", async () => {
+  const close = async () => {
     await Promise.all([...connections.values()].map(connection => connection.close()));
     connections.clear();
-    await managed.close();
-  });
-  for (const method of ["hover", "definition"] as const) {
-    pi.registerTool({
-      name: `cpp_${method}`, label: method === "hover" ? "C++ Hover" : "C++ Definition",
-      description: method === "hover" ? "Get C/C++ symbol types, signatures and documentation using clangd." : "Find C/C++ symbol definitions using clangd. Returns 1-based UTF-16 locations.",
-      promptSnippet: method === "hover" ? "Inspect C/C++ symbol types and documentation with clangd" : "Find C/C++ symbol definition locations with clangd",
-      parameters: Type.Object({
-        file: Type.String({ description: "Source path, absolute or relative to the project cwd" }),
-        line: Type.Integer({ minimum: 1, description: "1-based line" }),
-        column: Type.Integer({ minimum: 1, description: "1-based UTF-16 column (JavaScript string offsets + 1)" }),
-        build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json, relative to the project cwd (default: the managed CMake build directory once the project model is ready, else clangd's own search upward from the source file)" })),
-      }),
-      async execute(_id, params, signal, _onUpdate, ctx) {
-        const file = resolve(ctx.cwd, params.file);
-        const buildDir = params.build_dir === undefined ? undefined : resolve(ctx.cwd, params.build_dir);
-        const base = { file, line: params.line, column: params.column, build_dir: buildDir };
-        try {
-          checkSignal(signal);
-          // Fail locally before starting a server for nonexistent or unreadable input.
-          await readFile(file, "utf8");
-          if (buildDir) {
-            try { await readFile(resolve(buildDir, "compile_commands.json"), "utf8"); }
-            catch { throw new Error(`No readable compile_commands.json in build_dir: ${buildDir}. Generate a compilation database first.`); }
-          }
-          follow();
-          let connection = buildDir === undefined ? await waitFor(managed.connection(), signal) : undefined;
-          // The result names the managed compile database it used (KTD16).
-          const used = connection ? { ...base, build_dir: connection.buildDir, managed: true } : base;
-          const note = connection ? `\n[compile database: ${connection.buildDir} (managed)]` : "";
-          if (!connection) {
-            const key = JSON.stringify([resolve(ctx.cwd), buildDir]);
-            connection = connections.get(key);
-            if (!connection?.alive) {
-              connection = new ClangdConnection(resolve(ctx.cwd), buildDir, options);
-              connections.set(key, connection);
-            }
-          }
-          const result = await connection.query(method, file, params.line, params.column, signal);
-          if (method === "hover") {
-            const text = bounded(hoverText(result?.contents));
-            return { content: [{ type: "text", text: (text || "No hover information at this position.") + note }], details: { ...used, found: !!text, hover: text } };
-          }
-          const all = result ? (Array.isArray(result) ? result : [result]) : [];
-          const locations = all.slice(0, 100).map(location);
-          const text = locations.length ? locations.map(item => `${item.file}:${item.line}:${item.column}`).join("\n") : "No definition found at this position.";
-          return { content: [{ type: "text", text: bounded(text) + note }], details: { ...used, found: locations.length > 0, locations, truncated: all.length > locations.length } };
-        } catch (error) {
-          const message = bounded((error as Error).message);
-          return { isError: true, content: [{ type: "text", text: message }], details: { ...base, error: true, message } };
+  };
+  const specs = (["hover", "definition"] as const).map(method => defineTool({
+    name: `cpp_${method}`, label: method === "hover" ? "C++ Hover" : "C++ Definition",
+    description: method === "hover" ? "Get C/C++ symbol types, signatures and documentation using clangd." : "Find C/C++ symbol definitions using clangd. Returns 1-based UTF-16 locations.",
+    promptSnippet: method === "hover" ? "Inspect C/C++ symbol types and documentation with clangd" : "Find C/C++ symbol definition locations with clangd",
+    parameters: Type.Object({
+      file: Type.String({ description: "Source path, absolute or relative to the project cwd" }),
+      line: Type.Integer({ minimum: 1, description: "1-based line" }),
+      column: Type.Integer({ minimum: 1, description: "1-based UTF-16 column (JavaScript string offsets + 1)" }),
+      build_dir: Type.Optional(Type.String({ description: "Directory containing compile_commands.json, relative to the project cwd (default: the managed CMake build directory once the project model is ready, else clangd's own search upward from the source file)" })),
+    }),
+    async execute(params, { cwd, signal }) {
+      const file = resolve(cwd, params.file);
+      const buildDir = params.build_dir === undefined ? undefined : resolve(cwd, params.build_dir);
+      const base = { file, line: params.line, column: params.column, build_dir: buildDir };
+      try {
+        checkSignal(signal);
+        // Fail locally before starting a server for nonexistent or unreadable input.
+        await readFile(file, "utf8");
+        if (buildDir) {
+          try { await readFile(resolve(buildDir, "compile_commands.json"), "utf8"); }
+          catch { throw new Error(`No readable compile_commands.json in build_dir: ${buildDir}. Generate a compilation database first.`); }
         }
-      },
-    });
-  }
-  return managed;
+        const session = buildDir === undefined ? managed() : undefined;
+        let connection = session ? await waitFor(session.connection(), signal) : undefined;
+        // The result names the managed compile database it used (KTD16).
+        const used = connection ? { ...base, build_dir: connection.buildDir, managed: true } : base;
+        const note = connection ? `\n[compile database: ${connection.buildDir} (managed)]` : "";
+        if (!connection) {
+          const key = JSON.stringify([resolve(cwd), buildDir]);
+          connection = connections.get(key);
+          if (!connection?.alive) {
+            connection = new ClangdConnection(resolve(cwd), buildDir, options);
+            connections.set(key, connection);
+          }
+        }
+        const result = await connection.query(method, file, params.line, params.column, signal);
+        if (method === "hover") {
+          const text = bounded(hoverText(result?.contents));
+          return { content: [{ type: "text", text: (text || "No hover information at this position.") + note }], details: { ...used, found: !!text, hover: text } };
+        }
+        const all = result ? (Array.isArray(result) ? result : [result]) : [];
+        const locations = all.slice(0, 100).map(location);
+        const text = locations.length ? locations.map(item => `${item.file}:${item.line}:${item.column}`).join("\n") : "No definition found at this position.";
+        return { content: [{ type: "text", text: bounded(text) + note }], details: { ...used, found: locations.length > 0, locations, truncated: all.length > locations.length } };
+      } catch (error) {
+        const message = bounded((error as Error).message);
+        return { isError: true, content: [{ type: "text", text: message }], details: { ...base, error: true, message } };
+      }
+    },
+  }));
+  return { specs, close };
 }

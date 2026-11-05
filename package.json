@@ -28,8 +28,12 @@
     "cmake"
   ],
   "type": "module",
+  "workspaces": [
+    "packages/core"
+  ],
   "files": [
     "extensions",
+    "packages/core/src",
     "skills",
     "README.md",
     "LICENSE",

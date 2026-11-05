@@ -3,8 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { LOG_FILE, projectLog } from "../extensions/lib/log.ts";
-import { projectCacheDir } from "../extensions/lib/project/root.ts";
+import { LOG_FILE, projectLog } from "../packages/core/src/log.ts";
+import { projectCacheDir } from "../packages/core/src/project/root.ts";
 
 test("the project log appends timestamped lines in the managed cache, never in the project tree", t => {
   const previous = process.env.XDG_CACHE_HOME;

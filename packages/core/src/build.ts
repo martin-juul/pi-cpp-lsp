@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import type { Exec } from "./exec.ts";
 import { boundedOutput } from "./output.ts";
 import { findTarget, type ProjectModel } from "./project/model.ts";
+import { defineTool, type ToolSpec } from "./tools.ts";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -53,7 +54,8 @@ interface Invocation {
   target?: string;
 }
 
-export function registerBuildTools(pi: ExtensionAPI, project: ProjectModelSource = () => undefined): void {
+/** cpp_build, cpp_test and cpp_run. */
+export function buildToolSpecs(exec: Exec, project: ProjectModelSource = () => undefined): ToolSpec[] {
   /** Explicit build_dir wins; otherwise the ready model's managed directory, otherwise "build" (KTD16). */
   const buildDirFor = (params: Parameters) => params.build_dir ?? project()?.buildDir ?? FALLBACK_BUILD_DIR;
 
@@ -80,7 +82,7 @@ export function registerBuildTools(pi: ExtensionAPI, project: ProjectModelSource
       return failure(`${label} cancelled before execution. ${where}`);
     }
     try {
-      const result = await pi.exec(command, args, { cwd, signal, timeout });
+      const result = await exec(command, args, { cwd, signal, timeout });
       details.exitCode = result.code;
       details.killed = result.killed;
       details.cancelled = signal?.aborted ?? false;
@@ -140,7 +142,7 @@ export function registerBuildTools(pi: ExtensionAPI, project: ProjectModelSource
     return execute({ label: target.name, command: executable, args: params.args ?? [], cwd, buildDir: model.buildDir, timeout_ms: params.timeout_ms, target: target.name }, signal);
   }
 
-  pi.registerTool({
+  const build = defineTool({
     name: "cpp_build",
     label: "C++ Build",
     description: "Build an already configured CMake build directory. Does not configure the project.",
@@ -149,11 +151,11 @@ export function registerBuildTools(pi: ExtensionAPI, project: ProjectModelSource
       ...commonParameters,
       target: Type.Optional(Type.String({ minLength: 1, description: "CMake target to build (default: all default targets)" })),
     }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      return run("cmake", params, signal, ctx.cwd);
+    async execute(params, { cwd, signal }) {
+      return run("cmake", params, signal, cwd);
     },
   });
-  pi.registerTool({
+  const test = defineTool({
     name: "cpp_test",
     label: "C++ Test",
     description: "Run CTest in an existing build directory, showing failing test output. Fails if no tests match. Build first with cpp_build.",
@@ -162,11 +164,11 @@ export function registerBuildTools(pi: ExtensionAPI, project: ProjectModelSource
       ...commonParameters,
       regex: Type.Optional(Type.String({ description: "Run tests whose names match this CTest regular expression" })),
     }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      return run("ctest", params, signal, ctx.cwd);
+    async execute(params, { cwd, signal }) {
+      return run("ctest", params, signal, cwd);
     },
   });
-  pi.registerTool({
+  const runTool = defineTool({
     name: "cpp_run",
     label: "C++ Run",
     description: "Run a built executable target of the CMake project with arguments. Resolves the executable from the project model; build it first with cpp_build.",
@@ -177,8 +179,9 @@ export function registerBuildTools(pi: ExtensionAPI, project: ProjectModelSource
       cwd: Type.Optional(Type.String({ minLength: 1, description: "Working directory (default: the CMake source root)" })),
       timeout_ms: timeoutParameter,
     }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      return runTarget(params, signal, ctx.cwd);
+    async execute(params, { cwd, signal }) {
+      return runTarget(params, signal, cwd);
     },
   });
+  return [build, test, runTool];
 }

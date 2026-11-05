@@ -1,4 +1,3 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { randomBytes } from "node:crypto";
 import { chmod, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -17,6 +16,7 @@ import { projectCacheDir } from "./project/root.ts";
 import type { ProjectService } from "./project/session.ts";
 import type { Log } from "./log.ts";
 import { mapLimited, type TargetProfile, type ToolchainService } from "./toolchain.ts";
+import { defineTool, type ToolSpec } from "./tools.ts";
 
 /** How long a rename waits for clangd's background index to become idle (KTD14 step 2). */
 export const INDEX_WAIT_MS = 30_000;
@@ -32,7 +32,7 @@ export type RenameProject = Pick<ProjectService, "model" | "reportPoint" | "owne
 
 /** cpp_rename's options; waitMs and firstOpenWaitMs bound the post-edit diagnostics (see PostEditOptions). */
 export interface RenameToolOptions extends Pick<PostEditOptions, "waitMs" | "firstOpenWaitMs"> {
-  /** Runs clang-format for the post-edit pipeline; pass pi.exec. */
+  /** Runs clang-format for the post-edit pipeline. */
   exec: Exec;
   /** The session's project service. */
   getProject: () => RenameProject | undefined;
@@ -41,11 +41,11 @@ export interface RenameToolOptions extends Pick<PostEditOptions, "waitMs" | "fir
   /** Writes one file's new text; defaults to a temporary file renamed into place. */
   write?: (file: string, text: string) => Promise<void>;
   /**
-   * The session's C++ feature profiles. In a project whose build compiler supports features clangd
-   * lacks, clangd's index can miss uses in code that uses them, so the build compiler checks the
-   * targets the rename can affect.
+   * The session's C++ feature profiles, read on every call. In a project whose build compiler
+   * supports features clangd lacks, clangd's index can miss uses in code that uses them, so the
+   * build compiler checks the targets the rename can affect.
    */
-  toolchain?: Pick<ToolchainService, "gapProfiles" | "gapProfileFor">;
+  toolchain?: () => Pick<ToolchainService, "gapProfiles" | "gapProfileFor"> | undefined;
   /** Bound for that check; defaults to RENAME_CHECK_MS. */
   renameCheckMs?: number;
   /** Where the files and targets that check could not cover are recorded. */
@@ -93,7 +93,7 @@ function affectedGapTargets(model: ProjectModel, changed: string[], gaps: readon
 }
 
 /** Syntax-checks the C++ sources of `targets`, plus changed files of theirs that are not sources, within `limitMs`. */
-async function buildCheck(model: ProjectModel, targets: TargetProfile[], changed: string[], toolchain: NonNullable<RenameToolOptions["toolchain"]>, options: { exec: Exec; cwd: string; limitMs: number }): Promise<BuildCheck> {
+async function buildCheck(model: ProjectModel, targets: TargetProfile[], changed: string[], toolchain: Pick<ToolchainService, "gapProfiles" | "gapProfileFor">, options: { exec: Exec; cwd: string; limitMs: number }): Promise<BuildCheck> {
   const jobs: { file: string; profile: TargetProfile }[] = [];
   const queued = new Set<string>();
   const add = (file: string, profile: TargetProfile) => { if (!queued.has(file)) { queued.add(file); jobs.push({ file, profile }); } };
@@ -242,15 +242,15 @@ async function atomicWrite(file: string, text: string): Promise<void> {
 }
 
 /**
- * Registers cpp_rename (R24, R28): a project-wide rename through the session's managed clangd,
- * validated in full before anything is written and then written all at once (KTD14). Any refusal
- * changes nothing and says why. Each changed file then goes through the post-edit pipeline, called
- * directly because tool hooks do not fire for these writes.
+ * cpp_rename: a project-wide rename through the session's managed clangd, validated in full before
+ * anything is written and then written all at once. Any refusal changes nothing and says why. Each
+ * changed file then goes through the post-edit pipeline, called directly because tool hooks do not
+ * fire for these writes.
  */
-export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd, "connection">, options: RenameToolOptions): void {
+export function renameToolSpec(managed: () => Pick<ManagedClangd, "connection"> | undefined, options: RenameToolOptions): ToolSpec {
   const write = options.write ?? atomicWrite;
   const indexWaitMs = options.indexWaitMs ?? INDEX_WAIT_MS;
-  pi.registerTool({
+  return defineTool({
     name: "cpp_rename", label: "C++ Rename",
     description: "Rename the C/C++ symbol at a position across the CMake project with clangd, editing every file that uses it. The rename is refused, changing nothing, when clangd cannot rename the symbol, its index is still building, or an edit would land outside the project or in a build or dependency directory. Lists every changed file with its clangd diagnostics.",
     promptSnippet: "Rename a C/C++ symbol across the project with clangd instead of editing each use",
@@ -260,8 +260,8 @@ export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd
       column: Type.Integer({ minimum: 1, description: "1-based UTF-16 column (JavaScript string offsets + 1)" }),
       new_name: Type.String({ minLength: 1, description: "The new identifier" }),
     }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      const base = { file: resolve(ctx.cwd, params.file), line: params.line, column: params.column, new_name: params.new_name };
+    async execute(params, { cwd, signal }) {
+      const base = { file: resolve(cwd, params.file), line: params.line, column: params.column, new_name: params.new_name };
       const refused = (message: string, path?: string) => {
         const text = bounded(`Rename refused: ${message}. No files were changed.`);
         return { isError: true, content: [{ type: "text" as const, text }], details: { ...base, refused: true, reason: message, path } };
@@ -271,8 +271,8 @@ export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd
       let project: RenameProject;
       let planned: { file: string; original: string; text: string; edits: number }[];
       try {
-        const input = await position(ctx.cwd, params);
-        const connection = await waitFor(managed.connection(), signal);
+        const input = await position(cwd, params);
+        const connection = await waitFor(managed()?.connection() ?? Promise.resolve(undefined), signal);
         const current = options.getProject();
         const model = current?.model;
         if (!connection || !current || !model) throw new Error(NO_PROJECT);
@@ -333,16 +333,16 @@ export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd
       const perFile = { ownerOf: (path: string) => project.ownerOf(path) };
       const notes = new Map<string, string[]>();
       for (const entry of planned) {
-        notes.set(entry.file, await postEditLines(entry.file, { exec: options.exec, cwd: ctx.cwd, project: perFile, clangd: managed, waitMs: options.waitMs, firstOpenWaitMs: options.firstOpenWaitMs }));
+        notes.set(entry.file, await postEditLines(entry.file, { exec: options.exec, cwd, project: perFile, clangd: managed(), waitMs: options.waitMs, firstOpenWaitMs: options.firstOpenWaitMs }));
       }
 
       const files = planned.map(entry => entry.file);
       const model = project.model;
-      const toolchain = options.toolchain;
+      const toolchain = options.toolchain?.();
       const targets = model && toolchain && toolchain.gapProfiles.length > 0 ? affectedGapTargets(model, files, toolchain.gapProfiles) : [];
       const limitMs = options.renameCheckMs ?? RENAME_CHECK_MS;
       const check = model && toolchain && targets.length > 0
-        ? await buildCheck(model, targets, files, toolchain, { exec: options.exec, cwd: ctx.cwd, limitMs })
+        ? await buildCheck(model, targets, files, toolchain, { exec: options.exec, cwd, limitMs })
         : undefined;
 
       const changed: { file: string; edits: number; note?: string }[] = [];
@@ -350,12 +350,12 @@ export function registerRenameTool(pi: ExtensionAPI, managed: Pick<ManagedClangd
       for (const entry of planned) {
         let noteLines = notes.get(entry.file)!;
         const profile = check ? toolchain?.gapProfileFor(entry.file) : undefined;
-        if (check && profile && check.targets.some(target => target.target === profile.target)) noteLines = changedFileLines(entry.file, noteLines, profile, check.results.get(entry.file), ctx.cwd, options.log);
+        if (check && profile && check.targets.some(target => target.target === profile.target)) noteLines = changedFileLines(entry.file, noteLines, profile, check.results.get(entry.file), cwd, options.log);
         changed.push({ file: entry.file, edits: entry.edits, note: postEditText(noteLines) });
-        lines.push(`${cwdDisplayPath(ctx.cwd, entry.file)}: ${plural(entry.edits, "edit")}`);
+        lines.push(`${cwdDisplayPath(cwd, entry.file)}: ${plural(entry.edits, "edit")}`);
         if (noteLines.length > 0) lines.push(...noteLines.join("\n").split("\n").map(line => `  ${line}`));
       }
-      if (check) lines.push(...buildCheckLines(check, new Set(files), limitMs, ctx.cwd, options.log));
+      if (check) lines.push(...buildCheckLines(check, new Set(files), limitMs, cwd, options.log));
       const drift = await project.reportPoint().catch(() => undefined);
       if (drift) lines.push(drift);
       return { content: [{ type: "text" as const, text: bounded(lines.join("\n")) }], details: { ...base, changed, drift, ...(check ? { buildBroken: check.broken, unchecked: check.unchecked, uncheckable: check.failed } : {}) } };

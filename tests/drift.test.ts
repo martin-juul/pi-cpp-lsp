@@ -6,12 +6,12 @@ import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
-import { ConfigureManager, type Exec } from "../extensions/lib/project/configure.ts";
+import { ConfigureManager, type Exec } from "../packages/core/src/project/configure.ts";
 import {
   DRIFT_SKIPPED_MESSAGE, FindingsLedger, scanDrift,
   type DriftFinding, type DriftReport, type MissingFinding, type UnregisteredFinding,
-} from "../extensions/lib/project/drift.ts";
-import { loadProjectModel, type ProjectModel } from "../extensions/lib/project/model.ts";
+} from "../packages/core/src/project/drift.ts";
+import { loadProjectModel, type ProjectModel } from "../packages/core/src/project/model.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, "fixtures", "cmake");

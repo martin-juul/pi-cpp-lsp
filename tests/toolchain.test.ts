@@ -5,10 +5,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
-import type { CompilationEntry } from "../extensions/lib/compdb.ts";
-import type { Exec } from "../extensions/lib/project/configure.ts";
-import type { ProjectModel, ProjectTarget } from "../extensions/lib/project/model.ts";
-import { catalogStandard, measureClangd, measureCompiler, parseMacros, presentFeatures, probeSource, setupFeatureLines, ToolchainService, type ToolchainProject } from "../extensions/lib/toolchain.ts";
+import type { CompilationEntry } from "../packages/core/src/compdb.ts";
+import type { Exec } from "../packages/core/src/project/configure.ts";
+import type { ProjectModel, ProjectTarget } from "../packages/core/src/project/model.ts";
+import { catalogStandard, measureClangd, measureCompiler, parseMacros, presentFeatures, probeSource, setupFeatureLines, ToolchainService, type ToolchainProject } from "../packages/core/src/toolchain.ts";
+
+// The probe-directory count below must see only this file's probes, not those of test files
+// running at the same time, such as /cpp-setup's.
+process.env.TMPDIR = mkdtempSync(join(tmpdir(), "pi-cpp-toolchain-tmp-"));
 
 const mockClangd = resolve("tests/fixtures/mock-clangd.mjs");
 const mock = (...features: string[]) => ({ command: process.execPath, args: [mockClangd, `--mock-features=${features.join(",")}`], timeoutMs: 2000 });

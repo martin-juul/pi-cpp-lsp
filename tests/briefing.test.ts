@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { renderBriefing, type BriefingInput } from "../extensions/lib/project/briefing.ts";
-import type { ConfigureResult } from "../extensions/lib/project/configure.ts";
-import type { DriftFinding } from "../extensions/lib/project/drift.ts";
-import type { ProjectModel, ProjectTarget, TargetKind } from "../extensions/lib/project/model.ts";
-import { FEATURES, type TargetProfile } from "../extensions/lib/toolchain.ts";
+import { renderBriefing, type BriefingInput } from "../packages/core/src/project/briefing.ts";
+import type { ConfigureResult } from "../packages/core/src/project/configure.ts";
+import type { DriftFinding } from "../packages/core/src/project/drift.ts";
+import type { ProjectModel, ProjectTarget, TargetKind } from "../packages/core/src/project/model.ts";
+import { FEATURES, type TargetProfile } from "../packages/core/src/toolchain.ts";
 
 const root = "/work/proj";
 

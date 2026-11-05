@@ -1,13 +1,12 @@
-import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import type { Exec, ExecResult } from "../exec.ts";
 import { boundedOutput } from "../output.ts";
 import { buildLockPath, managedBuildDir, readProjectState } from "./root.ts";
 
-/** Command executor with pi.exec's signature, so the session can pass pi.exec directly. */
-export type Exec = (command: string, args: string[], options?: ExecOptions) => Promise<ExecResult>;
+export type { Exec } from "../exec.ts";
 
 export const CONFIGURE_TIMEOUT_MS = 300_000;
 const PROBE_TIMEOUT_MS = 30_000;

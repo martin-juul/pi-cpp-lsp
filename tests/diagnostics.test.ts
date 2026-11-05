@@ -7,12 +7,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../extensions/index.ts";
-import { ClangdConnection, type Diagnostic } from "../extensions/lib/clangd.ts";
-import { COMPILER_CHECK_TIMEOUT_MS, parseCompilerOutput, postEditNote, checkWithCompiler } from "../extensions/lib/diagnostics.ts";
-import type { Exec } from "../extensions/lib/project/configure.ts";
-import type { ProjectModel } from "../extensions/lib/project/model.ts";
-import { ProjectService } from "../extensions/lib/project/session.ts";
-import { ToolchainService, type TargetProfile } from "../extensions/lib/toolchain.ts";
+import { ClangdConnection, type Diagnostic } from "../packages/core/src/clangd.ts";
+import { COMPILER_CHECK_TIMEOUT_MS, parseCompilerOutput, postEditNote, checkWithCompiler } from "../packages/core/src/diagnostics.ts";
+import type { Exec } from "../packages/core/src/project/configure.ts";
+import type { ProjectModel } from "../packages/core/src/project/model.ts";
+import { ProjectService } from "../packages/core/src/project/session.ts";
+import { ToolchainService, type TargetProfile } from "../packages/core/src/toolchain.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, "fixtures", "cmake");

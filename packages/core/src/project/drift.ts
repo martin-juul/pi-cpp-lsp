@@ -75,7 +75,7 @@ export interface ScanDriftOptions {
   model?: ProjectModel;
   /** Missing sources parsed from a failed configure (KTD22). */
   missingSources?: readonly MissingSource[];
-  /** Runs `git ls-files`; pass pi.exec. */
+  /** Runs `git ls-files` */
   exec: Exec;
   signal?: AbortSignal;
 }

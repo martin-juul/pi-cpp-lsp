@@ -43,7 +43,7 @@ export function resolveToolPath(cwd: string, path: string): string {
 export type PostEditProject = Pick<ProjectService, "ownerOf"> & Partial<Pick<ProjectService, "reportPoint" | "model">>;
 
 export interface PostEditOptions {
-  /** Runs clang-format; pass pi.exec. */
+  /** Runs clang-format */
   exec: Exec;
   /** The working directory diagnostics paths are shown relative to. */
   cwd: string;
@@ -176,7 +176,7 @@ export function renderCompilerProblems(problems: CompilerProblem[], cwd: string)
 }
 
 export interface CompilerCheckOptions {
-  /** Runs the compiler; pass pi.exec. */
+  /** Runs the compiler */
   exec: Exec;
   /** The session's working directory, which a relative buildDir is resolved against. */
   cwd: string;
