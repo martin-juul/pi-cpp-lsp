@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { findCompilationDatabase, loadCompilationDatabase, probeInvocation, resolveCompileInvocation, splitCommand, syntaxArguments } from "../extensions/lib/compdb.ts";
+import { findCompilationDatabase, loadCompilationDatabase, probeInvocation, resolveCompileInvocation, splitCommand, syntaxArguments } from "../packages/core/src/compdb.ts";
 
 function fixture(t: { after: (fn: () => void) => void }) {
   const root = mkdtempSync(join(tmpdir(), "cpp-compdb-test-"));

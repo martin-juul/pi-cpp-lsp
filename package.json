@@ -1,6 +1,6 @@
 {
   "name": "pi-cpp-lsp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Pi extension for C/C++ development with clangd integration, auto-formatting, linting, and compilation checks",
   "author": {
     "name": "Martin Juul Christiansen",
@@ -28,8 +28,13 @@
     "cmake"
   ],
   "type": "module",
+  "workspaces": [
+    "packages/core",
+    "plugins/cpp-lsp"
+  ],
   "files": [
     "extensions",
+    "packages/core/src",
     "skills",
     "README.md",
     "LICENSE",
@@ -38,7 +43,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/*.test.ts"
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "build:plugin": "npm run build --workspace plugins/cpp-lsp"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

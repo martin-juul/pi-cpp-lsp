@@ -1,0 +1,34 @@
+{
+  "description": "Brings the C++ project briefing, the post-edit note and CMake drift from the cpp-lsp server into Claude's context",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "mcp_tool", "server": "plugin:cpp-lsp:core", "tool": "cpp_hook_prompt", "input": {}, "timeout": 30 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          { "type": "mcp_tool", "server": "plugin:cpp-lsp:core", "tool": "cpp_hook_post_edit", "input": { "file_path": "${tool_input.file_path}" }, "timeout": 90 }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "mcp_tool", "server": "plugin:cpp-lsp:core", "tool": "cpp_hook_after_shell", "input": {}, "timeout": 30 }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "clear|compact|resume",
+        "hooks": [
+          { "type": "mcp_tool", "server": "plugin:cpp-lsp:core", "tool": "cpp_hook_session_start", "input": { "source": "${source}" }, "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

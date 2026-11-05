@@ -1,0 +1,20 @@
+{
+  "name": "pi-cpp-lsp",
+  "owner": {
+    "name": "Martin Juul Christiansen",
+    "email": "code@juul.xyz"
+  },
+  "metadata": {
+    "description": "C/C++ support for coding agents from the pi-cpp-lsp repository"
+  },
+  "plugins": [
+    {
+      "name": "cpp-lsp",
+      "source": "./plugins/cpp-lsp",
+      "description": "C/C++ support for Claude Code: a CMake project briefing, post-edit notes with the build compiler's check, drift detection, and clangd-backed navigation, rename, build and test tools",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "category": "development"
+    }
+  ]
+}

@@ -6,12 +6,13 @@ import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
-import { ConfigureManager, LOCK_MAX_AGE_MS, probeCmake, resolvePreset, type ConfigureResult, type Exec } from "../extensions/lib/project/configure.ts";
-import { buildLockPath, findSourceRoot, managedBuildDir, projectCacheDir, writeRememberedPreset } from "../extensions/lib/project/root.ts";
+import type { Exec } from "../packages/core/src/exec.ts";
+import { ConfigureManager, LOCK_MAX_AGE_MS, probeCmake, resolvePreset, type ConfigureResult } from "../packages/core/src/project/configure.ts";
+import { buildLockPath, findSourceRoot, managedBuildDir, projectCacheDir, writeRememberedPreset } from "../packages/core/src/project/root.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, "fixtures", "cmake");
-const configureModule = join(here, "..", "extensions", "lib", "project", "configure.ts");
+const configureModule = join(here, "..", "packages", "core", "src", "project", "configure.ts");
 const hasCmake = spawnSync("cmake", ["--version"]).status === 0;
 const hasNinja = spawnSync("ninja", ["--version"]).status === 0;
 const hasMake = spawnSync("make", ["--version"]).status === 0;

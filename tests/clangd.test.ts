@@ -6,10 +6,11 @@ import { join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { cpSync, existsSync, readdirSync, realpathSync, readFileSync, writeFileSync, utimesSync } from "node:fs";
 import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { ProjectService } from "../extensions/lib/project/session.ts";
-import type { ProjectModel } from "../extensions/lib/project/model.ts";
+import { ProjectService } from "../packages/core/src/project/session.ts";
+import type { ProjectModel } from "../packages/core/src/project/model.ts";
 import { pathToFileURL } from "node:url";
-import { ClangdConnection, ClangdUnsupportedError, registerClangdTools, type ClangdOptions, type ClangdToolOptions } from "../extensions/lib/clangd.ts";
+import { ClangdConnection, ClangdUnsupportedError, type ClangdOptions } from "../packages/core/src/clangd.ts";
+import { registerClangdTools, type ClangdToolOptions } from "./support/register.ts";
 
 const fixture = resolve("tests/fixtures/mock-clangd.mjs");
 /** Registers the clangd tools on a fake ExtensionAPI that keeps every event handler. */

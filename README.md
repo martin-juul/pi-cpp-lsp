@@ -6,7 +6,7 @@
 [![Pi Package](https://img.shields.io/badge/pi-package-purple.svg)](https://pi.dev/packages)
 [![C++](https://img.shields.io/badge/C++-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org/)
 
-A [pi](https://pi.dev) extension providing C/C++ development support: formatting, static analysis, project-aware compile checks, clangd navigation, and CMake builds and tests.
+A [pi](https://pi.dev) extension providing C/C++ development support: formatting, static analysis, project-aware compile checks, clangd navigation, and CMake builds and tests. The same features are available in [Claude Code](#claude-code) as the `cpp-lsp` plugin.
 
 In a CMake project, the extension configures its own build directory, reads the CMake File API, and tells pi how the project is built: targets, C++ standards, dependencies and source files that are not registered in any `CMakeLists.txt`. For every target on C++11 or newer, it also tells pi which C++ features the build compiler and clangd actually support. Navigation tools use a clangd background index, so pi can find references, callers and derived classes instead of using grep.
 
@@ -29,6 +29,23 @@ Or try it for a single session without installing:
 ```bash
 pi -e npm:pi-cpp-lsp
 ```
+
+## Claude Code
+
+The `cpp-lsp` plugin brings the same features to Claude Code. This repository is its marketplace:
+
+```bash
+claude plugin marketplace add martin-juul/pi-cpp-lsp
+claude plugin install cpp-lsp@pi-cpp-lsp
+```
+
+The plugin runs a small Node server, so it needs `node` on your `PATH`, plus the same C/C++ tools as the pi extension (see [Required Tools](#required-tools)).
+
+- **Enable it per project.** Configuring a CMake project runs that project's own CMake code, so the plugin does nothing in a CMake project until you run `/cpp-lsp:trust` there. It remembers the projects you enable. Until then, the first prompt of a session says once that the plugin is not enabled.
+- **What Claude gets.** The same as pi: the project briefing with the first prompt (and again after `/clear` or `/compact`), the post-edit note after each Write or Edit, drift notes after Bash commands, and every `cpp_*` tool.
+- **Commands.** `/cpp-lsp:cpp-setup` checks your toolchain like pi's `/cpp-setup`. `/cpp-lsp:cpp-preset` lists the CMake configure presets, and `/cpp-lsp:cpp-preset <name>` switches to one.
+- **Cache and log.** The plugin keeps its state in `${XDG_CACHE_HOME:-~/.cache}/cpp-lsp-claude/<hash>/`, separate from pi's, including its log `cpp-lsp.log`.
+- **Claude Code's own clangd.** The plugin runs its own clangd and registers none with Claude Code. If Anthropic's `clangd-lsp` plugin is also enabled, Claude Code shows its clangd diagnostics after edits as well; those don't get the build compiler's check, which the log notes once.
 
 ## Quick Setup
 

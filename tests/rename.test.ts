@@ -7,11 +7,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { cpSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { ProjectService } from "../extensions/lib/project/session.ts";
-import type { ProjectModel } from "../extensions/lib/project/model.ts";
-import type { Exec } from "../extensions/lib/project/configure.ts";
-import { registerClangdTools, type ClangdToolOptions } from "../extensions/lib/clangd.ts";
-import { registerRenameTool, type RenameToolOptions } from "../extensions/lib/rename.ts";
+import { ProjectService } from "../packages/core/src/project/session.ts";
+import type { ProjectModel } from "../packages/core/src/project/model.ts";
+import type { Exec } from "../packages/core/src/exec.ts";
+import { registerClangdTools, registerRenameTool, type ClangdToolOptions, type RenameToolOptions } from "./support/register.ts";
 
 const mock = resolve("tests/fixtures/mock-clangd.mjs");
 
@@ -349,7 +348,7 @@ type TargetSpec = { name: string; gap?: boolean; dependencies?: string[]; source
  * are the specs marked `gap`. The fake compiler answers each checked source with `output(file)`, after
  * `delayMs`; like pi.exec it is killed at its timeout.
  */
-async function gapProject(t: any, specs: TargetSpec[], files: Record<string, string>, edit: (root: string) => unknown, options: { output?: (file: string) => string; delayMs?: number; renameCheckMs?: number } = {}) {
+async function gapProject(t: any, specs: TargetSpec[], files: Record<string, string>, edit: (root: string) => unknown, options: { output?: (file: string) => string; delayMs?: number; renameCheckMs?: number; earlyKillMs?: number } = {}) {
   const root = realpathSync(await mkdtemp(join(tmpdir(), "pi-rename-gap-")));
   const buildDir = join(root, "managed");
   await mkdir(buildDir);
@@ -390,7 +389,8 @@ async function gapProject(t: any, specs: TargetSpec[], files: Record<string, str
     compiled.push(file);
     const delay = options.delayMs ?? 0;
     if (execOptions?.timeout !== undefined && execOptions.timeout < delay) {
-      await new Promise(done => setTimeout(done, execOptions.timeout));
+      // A real timer may fire a little before the clock reaches the timeout.
+      await new Promise(done => setTimeout(done, execOptions.timeout - (options.earlyKillMs ?? 0)));
       return { stdout: "", stderr: "", code: 1, killed: true };
     }
     if (delay) await new Promise(done => setTimeout(done, delay));
@@ -456,19 +456,24 @@ test("a rename in a project without gap targets runs no compiler", async t => {
   assert.deepEqual(h.compiled, []);
 });
 
-test("a check that runs out of time says so and logs the targets it did not reach", async t => {
-  const h = await gapProject(t, [
-    { name: "app", gap: true, sources: { "a.cpp": "int old_name(); // DIAG\n" } },
-  ], {}, renameIn("a.cpp"), { delayMs: 500, renameCheckMs: 100 });
-  const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
-  assert.equal(result.isError, false, result.text);
-  assert.match(result.text, /not every file was checked within 0\.1s; see the pi-cpp-lsp log/);
-  assert.match(h.logged.join("\n"), /not checked within 0\.1s: app/);
-  // The changed file keeps clangd's errors; why the compiler did not judge it is in the log.
-  assert.match(result.text, /mock error/);
-  assert.doesNotMatch(result.text, /warning: clangd lacks/);
-  assert.match(h.logged.join("\n"), /a\.cpp: g\+\+ 16 could not check it/);
-});
+for (const earlyKillMs of [0, 5]) {
+  // A compile stopped at the time left counts as not reached even when its timer fires before the
+  // clock reaches the deadline, which happens on a busy machine.
+  test(`a check that runs out of time says so and logs the targets it did not reach${earlyKillMs ? ", even when the timer fires early" : ""}`, async t => {
+    const h = await gapProject(t, [
+      { name: "app", gap: true, sources: { "a.cpp": "int old_name(); // DIAG\n" } },
+    ], {}, renameIn("a.cpp"), { delayMs: 500, renameCheckMs: 100, earlyKillMs });
+    const result = await h.call({ file: "main.cpp", line: 1, column: 1, new_name: "new_name" });
+    assert.equal(result.isError, false, result.text);
+    assert.match(result.text, /not every file was checked within 0\.1s; see the pi-cpp-lsp log/);
+    assert.doesNotMatch(result.text, /no errors/);
+    assert.match(h.logged.join("\n"), /not checked within 0\.1s: app/);
+    // The changed file keeps clangd's errors; why the compiler did not judge it is in the log.
+    assert.match(result.text, /mock error/);
+    assert.doesNotMatch(result.text, /warning: clangd lacks/);
+    assert.match(h.logged.join("\n"), /a\.cpp: g\+\+ 16 could not check it/);
+  });
+}
 
 test("a changed header no target lists makes every gap target part of the check", async t => {
   const h = await gapProject(t, [
