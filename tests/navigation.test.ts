@@ -8,7 +8,7 @@ import { cpSync, realpathSync } from "node:fs";
 import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ProjectService } from "../packages/core/src/project/session.ts";
 import type { ProjectModel } from "../packages/core/src/project/model.ts";
-import { registerClangdTools, registerNavigationTools, type ClangdToolOptions } from "../extensions/register.ts";
+import { registerClangdTools, registerNavigationTools, type ClangdToolOptions } from "./support/register.ts";
 
 const mock = resolve("tests/fixtures/mock-clangd.mjs");
 

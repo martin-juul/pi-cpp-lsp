@@ -3,7 +3,7 @@ import { extname, isAbsolute, relative, resolve } from "node:path";
 import type { ClangdConnection, Diagnostic } from "./clangd.ts";
 import { probeInvocation, resolveCompileInvocation, type CompilationEntry } from "./compdb.ts";
 import { plural } from "./output.ts";
-import type { Exec } from "./project/configure.ts";
+import type { Exec } from "./exec.ts";
 import type { ProjectService } from "./project/session.ts";
 import { featureLabels, type TargetProfile, type ToolchainService, HEADER_EXTENSIONS } from "./toolchain.ts";
 import type { Log } from "./log.ts";
@@ -43,7 +43,7 @@ export function resolveToolPath(cwd: string, path: string): string {
 export type PostEditProject = Pick<ProjectService, "ownerOf"> & Partial<Pick<ProjectService, "reportPoint" | "model">>;
 
 export interface PostEditOptions {
-  /** Runs clang-format */
+  /** Runs clang-format. */
   exec: Exec;
   /** The working directory diagnostics paths are shown relative to. */
   cwd: string;
@@ -176,7 +176,7 @@ export function renderCompilerProblems(problems: CompilerProblem[], cwd: string)
 }
 
 export interface CompilerCheckOptions {
-  /** Runs the compiler */
+  /** Runs the compiler. */
   exec: Exec;
   /** The session's working directory, which a relative buildDir is resolved against. */
   cwd: string;

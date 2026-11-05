@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { ClangdConnection, type ClangdOptions } from "./clangd.ts";
 import { loadCompilationDatabase, probeInvocation, type CompilationEntry } from "./compdb.ts";
-import type { Exec } from "./project/configure.ts";
+import type { Exec } from "./exec.ts";
 import type { Log } from "./log.ts";
 import { oneLine } from "./output.ts";
 import { bestRealPath, isWithin, ownersOf, standardRank, type ProjectModel } from "./project/model.ts";

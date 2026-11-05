@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
 import extension from "../extensions/index.ts";
-import { registerBuildTools } from "../extensions/register.ts";
+import { registerBuildTools } from "./support/register.ts";
 import type { ProjectModel } from "../packages/core/src/project/model.ts";
 
 type Tool = {

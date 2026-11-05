@@ -15324,8 +15324,8 @@ var Protocol = class {
                   if (queuedMessage.type === "response") {
                     resolver(message);
                   } else {
-                    const errorMessage = message;
-                    const error2 = new McpError(errorMessage.error.code, errorMessage.error.message, errorMessage.error.data);
+                    const errorMessage2 = message;
+                    const error2 = new McpError(errorMessage2.error.code, errorMessage2.error.message, errorMessage2.error.data);
                     resolver(error2);
                   }
                 } else {
@@ -16636,23 +16636,23 @@ var Server = class extends Protocol {
       const wrappedHandler = async (request, extra) => {
         const validatedRequest = safeParse2(CallToolRequestSchema, request);
         if (!validatedRequest.success) {
-          const errorMessage = validatedRequest.error instanceof Error ? validatedRequest.error.message : String(validatedRequest.error);
-          throw new McpError(ErrorCode.InvalidParams, `Invalid tools/call request: ${errorMessage}`);
+          const errorMessage2 = validatedRequest.error instanceof Error ? validatedRequest.error.message : String(validatedRequest.error);
+          throw new McpError(ErrorCode.InvalidParams, `Invalid tools/call request: ${errorMessage2}`);
         }
         const { params } = validatedRequest.data;
         const result = await Promise.resolve(handler(request, extra));
         if (params.task) {
           const taskValidationResult = safeParse2(CreateTaskResultSchema, result);
           if (!taskValidationResult.success) {
-            const errorMessage = taskValidationResult.error instanceof Error ? taskValidationResult.error.message : String(taskValidationResult.error);
-            throw new McpError(ErrorCode.InvalidParams, `Invalid task creation result: ${errorMessage}`);
+            const errorMessage2 = taskValidationResult.error instanceof Error ? taskValidationResult.error.message : String(taskValidationResult.error);
+            throw new McpError(ErrorCode.InvalidParams, `Invalid task creation result: ${errorMessage2}`);
           }
           return taskValidationResult.data;
         }
         const validationResult = safeParse2(CallToolResultSchema, result);
         if (!validationResult.success) {
-          const errorMessage = validationResult.error instanceof Error ? validationResult.error.message : String(validationResult.error);
-          throw new McpError(ErrorCode.InvalidParams, `Invalid tools/call result: ${errorMessage}`);
+          const errorMessage2 = validationResult.error instanceof Error ? validationResult.error.message : String(validationResult.error);
+          throw new McpError(ErrorCode.InvalidParams, `Invalid tools/call result: ${errorMessage2}`);
         }
         return validationResult.data;
       };
@@ -25258,13 +25258,27 @@ function configureHarness(wording) {
 }
 
 // ../../packages/core/src/project/root.ts
-import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname as dirname2, isAbsolute, join, resolve } from "node:path";
+
+// ../../packages/core/src/files.ts
+import { randomUUID } from "node:crypto";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+function writeJsonAtomic(path, data) {
+  mkdirSync(dirname(path), { recursive: true });
+  const temp = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(data, null, 2)}
+`);
+  renameSync(temp, path);
+}
+
+// ../../packages/core/src/project/root.ts
 var hasCMakeLists = (dir) => existsSync(join(dir, "CMakeLists.txt"));
 function parentOf(dir) {
-  const parent = dirname(dir);
+  const parent = dirname2(dir);
   return parent === dir ? void 0 : parent;
 }
 function gitTopLevel(dir) {
@@ -25320,12 +25334,7 @@ function readProjectState(sourceRoot) {
   }
 }
 function writeRememberedPreset(sourceRoot, preset) {
-  const path = statePath(sourceRoot);
-  mkdirSync(dirname(path), { recursive: true });
-  const temp = `${path}.${randomUUID()}.tmp`;
-  writeFileSync(temp, `${JSON.stringify({ sourceRoot: realpathSync(sourceRoot), preset }, null, 2)}
-`);
-  renameSync(temp, path);
+  writeJsonAtomic(statePath(sourceRoot), { sourceRoot: realpathSync(sourceRoot), preset });
 }
 
 // ../../packages/core/src/log.ts
@@ -25426,16 +25435,16 @@ function truncateOutput(output) {
 }
 
 // ../../packages/core/src/project/briefing.ts
-import { dirname as dirname7, isAbsolute as isAbsolute6, relative as relative3 } from "node:path";
+import { dirname as dirname8, isAbsolute as isAbsolute6, relative as relative3 } from "node:path";
 
 // ../../packages/core/src/project/model.ts
 import { existsSync as existsSync3, readFileSync as readFileSync4, realpathSync as realpathSync2 } from "node:fs";
-import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute3, join as join5, relative, resolve as resolve3, sep } from "node:path";
+import { basename as basename2, dirname as dirname4, isAbsolute as isAbsolute3, join as join5, relative, resolve as resolve3, sep } from "node:path";
 
 // ../../packages/core/src/project/configure.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { existsSync as existsSync2, linkSync, mkdirSync as mkdirSync3, readdirSync, readFileSync as readFileSync3, rmSync, statSync as statSync2, writeFileSync as writeFileSync4 } from "node:fs";
-import { basename, dirname as dirname2, isAbsolute as isAbsolute2, join as join4, resolve as resolve2 } from "node:path";
+import { basename, dirname as dirname3, isAbsolute as isAbsolute2, join as join4, resolve as resolve2 } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 var CONFIGURE_TIMEOUT_MS = 3e5;
 var PROBE_TIMEOUT_MS = 3e4;
@@ -25470,7 +25479,7 @@ function loadPresetFile(path, root, presets, seen, errors) {
   }
   if (Array.isArray(data.include)) {
     for (const include of data.include) {
-      if (typeof include === "string") loadPresetFile(resolve2(dirname2(path), include), root, presets, seen, errors);
+      if (typeof include === "string") loadPresetFile(resolve2(dirname3(path), include), root, presets, seen, errors);
     }
   }
   if (Array.isArray(data.configurePresets)) {
@@ -25550,7 +25559,7 @@ function parseMissingSources(output, root) {
       frames.push({ file: absolute(frame[1]), line: Number(frame[2]) });
     }
     const { file, line } = frames.find((frame) => basename(frame.file) === "CMakeLists.txt") ?? frames[0];
-    const missing = { path: resolve2(dirname2(file), match[3]), file, line };
+    const missing = { path: resolve2(dirname3(file), match[3]), file, line };
     found.set(`${missing.path}\0${missing.file}\0${missing.line}`, missing);
   }
   return [...found.values()];
@@ -25705,7 +25714,7 @@ var ConfigureManager = class {
       const common = { buildDir, preset: presets.preset, notes: notes2 };
       if (this.signal?.aborted) return cancelled(common);
       const lockPath = buildLockPath(buildDir);
-      mkdirSync3(dirname2(buildDir), { recursive: true });
+      mkdirSync3(dirname3(buildDir), { recursive: true });
       let lock;
       while (!(lock = tryLock(lockPath))) {
         const owner = readLock(lockPath);
@@ -25812,7 +25821,7 @@ function bestRealPath(path) {
   try {
     return realpathSync2(absolute);
   } catch {
-    const parent = dirname3(absolute);
+    const parent = dirname4(absolute);
     return parent === absolute ? absolute : join5(bestRealPath(parent), basename2(absolute));
   }
 }
@@ -25884,7 +25893,7 @@ function clientReply(index, indexFile, kind) {
   if (!entry) throw new ProjectModelError(`The reply index ${indexFile} has no ${kind} reply for ${FILE_API_CLIENT}; the query was not written before this configure.`);
   if (typeof entry.error === "string") throw new ProjectModelError(`CMake could not answer the ${kind} query: ${entry.error}`);
   if (typeof entry.jsonFile !== "string") throw new ProjectModelError(`The ${kind} entry in ${indexFile} names no reply file.`);
-  return join5(dirname3(indexFile), entry.jsonFile);
+  return join5(dirname4(indexFile), entry.jsonFile);
 }
 function resolveBacktraces(graph, sourceDir) {
   const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
@@ -26007,7 +26016,7 @@ async function loadProjectModel(options) {
   const entries = configuration.targets;
   const raw = entries.map((entry) => {
     if (typeof entry?.jsonFile !== "string") throw new ProjectModelError(`The codemodel reply ${codemodelFile} lists a target without a reply file.`);
-    return readJson(join5(dirname3(indexFile), entry.jsonFile), "target reply");
+    return readJson(join5(dirname4(indexFile), entry.jsonFile), "target reply");
   });
   const nameById = new Map(raw.map((target) => [target.id, target.name]));
   const targets = raw.map((target) => {
@@ -26114,7 +26123,7 @@ import { fileURLToPath as fileURLToPath2, pathToFileURL as pathToFileURL2 } from
 
 // ../../packages/core/src/tools.ts
 import { existsSync as existsSync6 } from "node:fs";
-import { dirname as dirname6, join as join8, resolve as resolve9 } from "node:path";
+import { dirname as dirname7, join as join8, resolve as resolve9 } from "node:path";
 
 // ../../packages/core/src/build.ts
 import { existsSync as existsSync4 } from "node:fs";
@@ -26264,7 +26273,7 @@ ${where}`);
 
 // ../../packages/core/src/compdb.ts
 import { existsSync as existsSync5, readFileSync as readFileSync5, realpathSync as realpathSync3 } from "node:fs";
-import { basename as basename3, dirname as dirname4, extname, isAbsolute as isAbsolute4, join as join6, resolve as resolve5 } from "node:path";
+import { basename as basename3, dirname as dirname5, extname, isAbsolute as isAbsolute4, join as join6, resolve as resolve5 } from "node:path";
 function splitCommand(command) {
   const words = [];
   let word = "", quote = "", started = false;
@@ -26312,9 +26321,9 @@ function findCompilationDatabase(cwd, file, buildDir) {
     return candidate;
   }
   const roots = /* @__PURE__ */ new Set([resolve5(cwd)]);
-  for (let dir = dirname4(resolve5(cwd, file)); ; dir = dirname4(dir)) {
+  for (let dir = dirname5(resolve5(cwd, file)); ; dir = dirname5(dir)) {
     roots.add(dir);
-    if (dirname4(dir) === dir) break;
+    if (dirname5(dir) === dir) break;
   }
   for (const root of roots) {
     for (const candidate of [join6(root, "compile_commands.json"), join6(root, "build", "compile_commands.json")]) {
@@ -26390,7 +26399,7 @@ function loadCompilationDatabase(database) {
     } catch {
       continue;
     }
-    const directory = resolve5(dirname4(database), value.directory);
+    const directory = resolve5(dirname5(database), value.directory);
     const file = canonical(resolve5(directory, value.file));
     if (!result.has(file)) result.set(file, { file, directory, argv });
   }
@@ -26409,9 +26418,9 @@ function resolveCompileInvocation(cwd, options) {
   const database = findCompilationDatabase(cwd, file, options.build_dir);
   if (database) {
     const entries = readEntries(database);
-    const entry = entries.find((value) => isEntry(value) && canonical(resolve5(dirname4(database), value.directory, value.file)) === canonical(file));
+    const entry = entries.find((value) => isEntry(value) && canonical(resolve5(dirname5(database), value.directory, value.file)) === canonical(file));
     if (!entry) throw new Error(`No compilation database entry for ${file} in ${database}; select the correct build_dir or add this file to the build`);
-    const directory = resolve5(dirname4(database), entry.directory);
+    const directory = resolve5(dirname5(database), entry.directory);
     const argv = entryArgv(entry);
     const compiler2 = options.compiler ?? argv[0];
     if (!compiler2) throw new Error("Compilation command is empty");
@@ -26628,7 +26637,7 @@ ${note}` : "");
 // ../../packages/core/src/rename.ts
 import { randomBytes } from "node:crypto";
 import { chmod, readFile as readFile2, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename as basename4, dirname as dirname5, join as join7, resolve as resolve8 } from "node:path";
+import { basename as basename4, dirname as dirname6, join as join7, resolve as resolve8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ../../packages/core/src/diagnostics.ts
@@ -26974,7 +26983,7 @@ function apply(file, text2, edits) {
   return result;
 }
 async function atomicWrite(file, text2) {
-  const temp = join7(dirname5(file), `.${basename4(file)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
+  const temp = join7(dirname6(file), `.${basename4(file)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
   try {
     const { mode } = await stat(file);
     await writeFile(temp, text2);
@@ -27153,7 +27162,7 @@ Tool not available: ${checker} is not installed or not on PATH`);
         try {
           let result;
           if (checker === "clang-tidy") {
-            result = await exec("clang-tidy", [file, ...database ? ["-p", dirname6(database)] : []], {
+            result = await exec("clang-tidy", [file, ...database ? ["-p", dirname7(database)] : []], {
               cwd,
               signal,
               timeout: 3e4
@@ -28509,7 +28518,7 @@ function describeFinding(finding, root, options = {}) {
     return `${path} is missing on disk but listed${by}${where}; remove it from the list or restore the file.`;
   }
   if (finding.uncovered) {
-    return `${path} is in no target, and no CMakeLists.txt covers ${displayPath(root, dirname7(finding.path))}; add a target or an add_subdirectory for it.`;
+    return `${path} is in no target, and no CMakeLists.txt covers ${displayPath(root, dirname8(finding.path))}; add a target or an add_subdirectory for it.`;
   }
   const places = finding.candidates.map((candidate) => {
     const location2 = candidate.location;
@@ -28622,7 +28631,7 @@ function configureSection(input) {
   return lines;
 }
 function ownedDirectories(root, target) {
-  const dirs = [...new Set(target.sources.filter((source) => !source.isGenerated).map((source) => displayPath(root, dirname7(source.path))))].sort();
+  const dirs = [...new Set(target.sources.filter((source) => !source.isGenerated).map((source) => displayPath(root, dirname8(source.path))))].sort();
   return dirs.length > 0 ? dirs : [displayPath(root, target.sourceDir)];
 }
 function targetRow(root, target) {
@@ -28904,11 +28913,11 @@ ${configureErrorExcerpt(result)}` : ""}`, "error");
 
 // ../../packages/core/src/project/session.ts
 import { existsSync as existsSync9, readdirSync as readdirSync3, statSync as statSync3 } from "node:fs";
-import { dirname as dirname9, join as join11 } from "node:path";
+import { dirname as dirname10, join as join11 } from "node:path";
 
 // ../../packages/core/src/project/drift.ts
 import { existsSync as existsSync8, readdirSync as readdirSync2, readFileSync as readFileSync6, realpathSync as realpathSync4 } from "node:fs";
-import { basename as basename6, dirname as dirname8, extname as extname5, join as join10, resolve as resolve13 } from "node:path";
+import { basename as basename6, dirname as dirname9, extname as extname5, join as join10, resolve as resolve13 } from "node:path";
 var DRIFT_SCAN_TIMEOUT_MS = 2e3;
 var DRIFT_SKIPPED_MESSAGE = "drift check skipped: project too large to scan in time";
 var DRIFT_NO_MODEL_MESSAGE = "unregistered files are not checked until the project has configured successfully once";
@@ -28988,7 +28997,7 @@ async function collectCandidates(root, model, exec, signal) {
   for (let i = 0; i < paths.length; i++) {
     if (i % 256 === 0 && (Date.now() > deadline || signal?.aborted)) return "timeout";
     const path = paths[i];
-    if (!SOURCE_EXTENSIONS.has(extname5(path)) || !keepDir(dirname8(path))) continue;
+    if (!SOURCE_EXTENSIONS.has(extname5(path)) || !keepDir(dirname9(path))) continue;
     let real;
     try {
       real = realpathSync4(path);
@@ -29012,7 +29021,7 @@ var Owners = class {
       this.byDefinitionDir.set(target.sourceDir, defined);
       for (const source of target.sources) {
         if (source.isGenerated) continue;
-        const dir = dirname8(source.path);
+        const dir = dirname9(source.path);
         const targets = this.bySourceDir.get(dir) ?? /* @__PURE__ */ new Map();
         const entry = targets.get(target);
         if (entry) entry.count++;
@@ -29025,7 +29034,7 @@ var Owners = class {
   candidates(path) {
     const root = this.model.sourceRoot;
     const byName = (a, b) => a.target.localeCompare(b.target);
-    for (let dir = dirname8(path); isWithin(root, dir); dir = dirname8(dir)) {
+    for (let dir = dirname9(path); isWithin(root, dir); dir = dirname9(dir)) {
       const owning = this.bySourceDir.get(dir);
       if (owning && owning.size > 0) {
         const most = Math.max(...[...owning.values()].map((entry) => entry.count));
@@ -29041,7 +29050,7 @@ var Owners = class {
           return location2 ? { target: target.name, location: location2 } : { target: target.name };
         }).sort(byName);
       }
-      if (dir === root || dirname8(dir) === dir) break;
+      if (dir === root || dirname9(dir) === dir) break;
     }
     return [];
   }
@@ -29062,10 +29071,10 @@ var GLOB_COMMAND = /(?:^|[^\w])file\s*\(\s*GLOB(?:_RECURSE)?(?:\s|\))/im;
 var FILE_NAME_CHAR = /[\w.+-]/;
 var PATH_CHAR = /[\w.+\-/\\@~]/;
 var stripComment = (line) => line.replace(/(^|\s)#.*$/, "$1");
-var sourceDirs = (file, root) => basename6(file) === "CMakeLists.txt" ? [dirname8(file)] : [dirname8(file), root];
+var sourceDirs = (file, root) => basename6(file) === "CMakeLists.txt" ? [dirname9(file)] : [dirname9(file), root];
 function variableBases(name, file, root) {
   if (name.endsWith("_BINARY_DIR")) return [];
-  if (name === "CMAKE_CURRENT_LIST_DIR") return [dirname8(file)];
+  if (name === "CMAKE_CURRENT_LIST_DIR") return [dirname9(file)];
   if (name === "CMAKE_SOURCE_DIR" || name === "PROJECT_SOURCE_DIR") return [root];
   if (name === "CMAKE_CURRENT_SOURCE_DIR") return sourceDirs(file, root);
   return void 0;
@@ -29462,7 +29471,7 @@ var ProjectService = class {
     for (const input of inputs) {
       let time3 = mtime(input);
       if (time3 === void 0 && this.currentModel?.cmakeInputs.includes(input)) {
-        for (let dir = dirname9(input); time3 === void 0 && isWithin(root, dir); dir = dirname9(dir)) time3 = mtime(dir);
+        for (let dir = dirname10(input); time3 === void 0 && isWithin(root, dir); dir = dirname10(dir)) time3 = mtime(dir);
       }
       if (time3 !== void 0 && Math.floor(time3) > baseline) return true;
     }
@@ -29768,13 +29777,11 @@ async function prompt(plugin) {
   return parts.length > 0 ? parts.join("\n\n") : void 0;
 }
 async function postEdit(plugin, file) {
-  if (plugin.untrusted()) return void 0;
-  const session = plugin.current();
-  return typeof file === "string" && file ? session.postEditNote(file) : session.afterShell();
+  if (typeof file !== "string" || !file) return afterShell(plugin);
+  return plugin.activeSession()?.postEditNote(file);
 }
 async function afterShell(plugin) {
-  if (plugin.untrusted()) return void 0;
-  return plugin.current().afterShell();
+  return plugin.activeSession()?.afterShell();
 }
 async function runHook(plugin, name, args) {
   switch (name) {
@@ -29805,6 +29812,9 @@ var UNTRUSTED2 = {
 };
 function usePluginWording() {
   configureHarness({ notePrefix: "cpp-lsp:", presetCommand: "/cpp-lsp:cpp-preset", logName: "cpp-lsp", cacheName: "cpp-lsp-claude" });
+}
+function errorMessage(error2) {
+  return error2 instanceof Error ? error2.message : String(error2);
 }
 function isEntry2(moduleUrl) {
   const entry = process.argv[1];
@@ -29849,7 +29859,7 @@ var nodeExec = (command, args, options = {}) => new Promise((resolve14) => {
 });
 
 // src/trust.ts
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync7, renameSync as renameSync2, writeFileSync as writeFileSync6 } from "node:fs";
+import { readFileSync as readFileSync7 } from "node:fs";
 import { join as join12 } from "node:path";
 var TRUST_FILE = "trusted.json";
 var trustFile = (dataDir) => join12(dataDir, TRUST_FILE);
@@ -29926,10 +29936,10 @@ var CppPlugin = class {
     }
     return this.session;
   }
-  /** Whether the project is a CMake project the user has not enabled; the session is current after it. */
-  untrusted() {
-    this.current();
-    return !this.trusted;
+  /** The current session, or undefined in a CMake project the user has not enabled. */
+  activeSession() {
+    const session = this.current();
+    return this.trusted ? session : void 0;
   }
   /** The tools' answer in a project the user has not enabled: the tools would run its code. */
   gateMessage() {
@@ -30031,14 +30041,14 @@ async function createServer(plugin) {
     if (hook) return hook;
     const spec = byName.get(name);
     if (!spec) return text(`Unknown tool: ${name}`, true);
-    if (plugin.untrusted()) return text(plugin.gateMessage(), true);
+    if (!plugin.activeSession()) return text(plugin.gateMessage(), true);
     const checked = checkArguments(spec, args);
     if ("error" in checked) return text(checked.error, true);
     try {
       const result = await spec.execute(checked.params, { cwd: plugin.projectDir, signal: extra.signal });
       return { content: result.content, ...result.isError ? { isError: true } : {} };
     } catch (error2) {
-      return text(`${name} failed: ${error2 instanceof Error ? error2.message : String(error2)}`, true);
+      return text(`${name} failed: ${errorMessage(error2)}`, true);
     }
   });
   return server;

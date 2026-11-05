@@ -1,5 +1,5 @@
 import { findSourceRoot } from "../../../../packages/core/src/project/root.ts";
-import { isEntry } from "../runtime.ts";
+import { errorMessage, isEntry } from "../runtime.ts";
 import { addTrusted, trustFile } from "../trust.ts";
 
 /**
@@ -15,7 +15,7 @@ export function trustReport(projectDir: string | undefined, dataDir: string | un
   try {
     if (!addTrusted(dataDir, root)) return `cpp-lsp is already enabled for ${root}.`;
   } catch (error) {
-    return `cpp-lsp could not enable ${root}: writing ${trustFile(dataDir)} failed: ${error instanceof Error ? error.message : String(error)}`;
+    return `cpp-lsp could not enable ${root}: writing ${trustFile(dataDir)} failed: ${errorMessage(error)}`;
   }
   return `cpp-lsp is now enabled for ${root}. It configures the project with CMake in its own cache, and the next prompt carries the project briefing. New sessions in this project start enabled.`;
 }
@@ -25,6 +25,6 @@ if (isEntry(import.meta.url)) {
   try {
     console.log(trustReport(projectDir || process.env.CLAUDE_PROJECT_DIR, dataDir || process.env.CLAUDE_PLUGIN_DATA));
   } catch (error) {
-    console.log(`cpp-lsp could not enable the project: ${error instanceof Error ? error.message : String(error)}`);
+    console.log(`cpp-lsp could not enable the project: ${errorMessage(error)}`);
   }
 }

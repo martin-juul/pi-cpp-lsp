@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { LOG_FILE, projectLog } from "../packages/core/src/log.ts";
+import { logFileName, projectLog } from "../packages/core/src/log.ts";
 import { projectCacheDir } from "../packages/core/src/project/root.ts";
 
 test("the project log appends timestamped lines in the managed cache, never in the project tree", t => {
@@ -19,12 +19,13 @@ test("the project log appends timestamped lines in the managed cache, never in t
   const log = projectLog(root);
   log("first");
   log("second");
-  const file = join(projectCacheDir(root), LOG_FILE);
+  assert.equal(logFileName(), "pi-cpp-lsp.log");
+  const file = join(projectCacheDir(root), logFileName());
   const lines = readFileSync(file, "utf8").trimEnd().split("\n");
   assert.equal(lines.length, 2);
   assert.match(lines[0]!, /^\d{4}-\d\d-\d\dT\S+Z first$/);
   assert.match(lines[1]!, / second$/);
-  assert.ok(!existsSync(join(root, LOG_FILE)));
+  assert.ok(!existsSync(join(root, logFileName())));
   // A log past its cap keeps its newer half.
   writeFileSync(file, `${"old line\n".repeat(70_000)}`);
   log("newest");

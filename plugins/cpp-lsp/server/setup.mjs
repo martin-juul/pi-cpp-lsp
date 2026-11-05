@@ -5397,6 +5397,9 @@ var UNTRUSTED = {
 function usePluginWording() {
   configureHarness({ notePrefix: "cpp-lsp:", presetCommand: "/cpp-lsp:cpp-preset", logName: "cpp-lsp", cacheName: "cpp-lsp-claude" });
 }
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
 function isEntry(moduleUrl) {
   const entry = process.argv[1];
   if (!entry) return false;
@@ -5448,7 +5451,7 @@ if (isEntry(import.meta.url)) {
   try {
     console.log(await setupReport(nodeExec));
   } catch (error) {
-    console.log(`cpp-lsp could not check the toolchain: ${error instanceof Error ? error.message : String(error)}`);
+    console.log(`cpp-lsp could not check the toolchain: ${errorMessage(error)}`);
   }
 }
 export {

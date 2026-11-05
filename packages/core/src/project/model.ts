@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { FILE_API_CLIENT, type Exec } from "./configure.ts";
+import type { Exec } from "../exec.ts";
+import { FILE_API_CLIENT } from "./configure.ts";
 
 const CTEST_TIMEOUT_MS = 30_000;
 

@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
-import type { Exec, MissingSource } from "./configure.ts";
+import type { Exec } from "../exec.ts";
+import type { MissingSource } from "./configure.ts";
 import {
   bestRealPath, declaringLocation, isWithin, ownersOf, skippedDirCheck,
   type DeclaringLocation, type ProjectModel, type ProjectSource, type ProjectTarget,
@@ -75,7 +76,7 @@ export interface ScanDriftOptions {
   model?: ProjectModel;
   /** Missing sources parsed from a failed configure (KTD22). */
   missingSources?: readonly MissingSource[];
-  /** Runs `git ls-files` */
+  /** Runs `git ls-files`. */
   exec: Exec;
   signal?: AbortSignal;
 }

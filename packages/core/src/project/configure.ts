@@ -6,8 +6,6 @@ import type { Exec, ExecResult } from "../exec.ts";
 import { boundedOutput } from "../output.ts";
 import { buildLockPath, managedBuildDir, readProjectState } from "./root.ts";
 
-export type { Exec } from "../exec.ts";
-
 export const CONFIGURE_TIMEOUT_MS = 300_000;
 const PROBE_TIMEOUT_MS = 30_000;
 /** A lock older than this is stale even when its PID is alive: a holder's probes and configure are killed sooner. */

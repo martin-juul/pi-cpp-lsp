@@ -13,7 +13,7 @@ import { CppSession } from "../../../packages/core/src/session.ts";
 import type { ToolchainServiceOptions } from "../../../packages/core/src/toolchain.ts";
 import { cppTools, defineTool, type CppTools, type ToolSpec } from "../../../packages/core/src/tools.ts";
 import { HOOK_TOOLS, runHook } from "./hooks.ts";
-import { isEntry, nodeExec, TRUST_COMMAND, UNTRUSTED, usePluginWording } from "./runtime.ts";
+import { errorMessage, isEntry, nodeExec, TRUST_COMMAND, UNTRUSTED, usePluginWording } from "./runtime.ts";
 import { isTrusted } from "./trust.ts";
 
 export const SERVER_NAME = "cpp-lsp";
@@ -103,10 +103,10 @@ export class CppPlugin {
     return this.session;
   }
 
-  /** Whether the project is a CMake project the user has not enabled; the session is current after it. */
-  untrusted(): boolean {
-    this.current();
-    return !this.trusted;
+  /** The current session, or undefined in a CMake project the user has not enabled. */
+  activeSession(): CppSession | undefined {
+    const session = this.current();
+    return this.trusted ? session : undefined;
   }
 
   /** The tools' answer in a project the user has not enabled: the tools would run its code. */
@@ -225,14 +225,14 @@ export async function createServer(plugin: CppPlugin): Promise<Server> {
     const spec = byName.get(name);
     if (!spec) return text(`Unknown tool: ${name}`, true);
     // In a CMake project the user has not enabled, no tool runs anything.
-    if (plugin.untrusted()) return text(plugin.gateMessage(), true);
+    if (!plugin.activeSession()) return text(plugin.gateMessage(), true);
     const checked = checkArguments(spec, args);
     if ("error" in checked) return text(checked.error, true);
     try {
       const result = await spec.execute(checked.params as never, { cwd: plugin.projectDir, signal: extra.signal });
       return { content: result.content, ...(result.isError ? { isError: true } : {}) };
     } catch (error) {
-      return text(`${name} failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      return text(`${name} failed: ${errorMessage(error)}`, true);
     }
   });
   return server;

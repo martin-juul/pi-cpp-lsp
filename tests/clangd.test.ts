@@ -10,7 +10,7 @@ import { ProjectService } from "../packages/core/src/project/session.ts";
 import type { ProjectModel } from "../packages/core/src/project/model.ts";
 import { pathToFileURL } from "node:url";
 import { ClangdConnection, ClangdUnsupportedError, type ClangdOptions } from "../packages/core/src/clangd.ts";
-import { registerClangdTools, type ClangdToolOptions } from "../extensions/register.ts";
+import { registerClangdTools, type ClangdToolOptions } from "./support/register.ts";
 
 const fixture = resolve("tests/fixtures/mock-clangd.mjs");
 /** Registers the clangd tools on a fake ExtensionAPI that keeps every event handler. */

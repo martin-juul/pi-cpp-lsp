@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../extensions/index.ts";
-import type { Exec } from "../packages/core/src/project/configure.ts";
+import type { Exec } from "../packages/core/src/exec.ts";
 import type { FeatureState } from "../packages/core/src/project/briefing.ts";
 import { ProjectService, UPDATE_MESSAGE } from "../packages/core/src/project/session.ts";
 import type { TargetProfile } from "../packages/core/src/toolchain.ts";

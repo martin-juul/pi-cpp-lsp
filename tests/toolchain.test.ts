@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
 import type { CompilationEntry } from "../packages/core/src/compdb.ts";
-import type { Exec } from "../packages/core/src/project/configure.ts";
+import type { Exec } from "../packages/core/src/exec.ts";
 import type { ProjectModel, ProjectTarget } from "../packages/core/src/project/model.ts";
 import { catalogStandard, measureClangd, measureCompiler, parseMacros, presentFeatures, probeSource, setupFeatureLines, ToolchainService, type ToolchainProject } from "../packages/core/src/toolchain.ts";
 

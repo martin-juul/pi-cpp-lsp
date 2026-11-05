@@ -1,8 +1,20 @@
 import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);
 
 // ../../packages/core/src/project/root.ts
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { dirname as dirname2, isAbsolute, join, resolve } from "node:path";
+
+// ../../packages/core/src/files.ts
+import { randomUUID } from "node:crypto";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+function writeJsonAtomic(path, data) {
+  mkdirSync(dirname(path), { recursive: true });
+  const temp = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(data, null, 2)}
+`);
+  renameSync(temp, path);
+}
 
 // ../../packages/core/src/harness.ts
 var PI = {
@@ -16,7 +28,7 @@ var harness = { ...PI };
 // ../../packages/core/src/project/root.ts
 var hasCMakeLists = (dir) => existsSync(join(dir, "CMakeLists.txt"));
 function parentOf(dir) {
-  const parent = dirname(dir);
+  const parent = dirname2(dir);
   return parent === dir ? void 0 : parent;
 }
 function gitTopLevel(dir) {
@@ -54,6 +66,9 @@ var UNTRUSTED = {
   // Enabling takes effect in the running session, unlike pi's trust, which needs a restart.
   until: "until you enable the plugin here"
 };
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
 function isEntry(moduleUrl) {
   const entry = process.argv[1];
   if (!entry) return false;
@@ -65,9 +80,8 @@ function isEntry(moduleUrl) {
 }
 
 // src/trust.ts
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { readFileSync as readFileSync2 } from "node:fs";
 import { join as join2 } from "node:path";
-import { randomUUID } from "node:crypto";
 var TRUST_FILE = "trusted.json";
 var trustFile = (dataDir) => join2(dataDir, TRUST_FILE);
 function readTrusted(dataDir) {
@@ -82,12 +96,7 @@ function readTrusted(dataDir) {
 function addTrusted(dataDir, root) {
   const roots = readTrusted(dataDir);
   if (roots.includes(root)) return false;
-  mkdirSync2(dataDir, { recursive: true });
-  const path = trustFile(dataDir);
-  const temp = `${path}.${randomUUID()}.tmp`;
-  writeFileSync2(temp, `${JSON.stringify([...roots, root], null, 2)}
-`);
-  renameSync2(temp, path);
+  writeJsonAtomic(trustFile(dataDir), [...roots, root]);
   return true;
 }
 
@@ -100,7 +109,7 @@ function trustReport(projectDir, dataDir) {
   try {
     if (!addTrusted(dataDir, root)) return `cpp-lsp is already enabled for ${root}.`;
   } catch (error) {
-    return `cpp-lsp could not enable ${root}: writing ${trustFile(dataDir)} failed: ${error instanceof Error ? error.message : String(error)}`;
+    return `cpp-lsp could not enable ${root}: writing ${trustFile(dataDir)} failed: ${errorMessage(error)}`;
   }
   return `cpp-lsp is now enabled for ${root}. It configures the project with CMake in its own cache, and the next prompt carries the project briefing. New sessions in this project start enabled.`;
 }
@@ -109,7 +118,7 @@ if (isEntry(import.meta.url)) {
   try {
     console.log(trustReport(projectDir || process.env.CLAUDE_PROJECT_DIR, dataDir || process.env.CLAUDE_PLUGIN_DATA));
   } catch (error) {
-    console.log(`cpp-lsp could not enable the project: ${error instanceof Error ? error.message : String(error)}`);
+    console.log(`cpp-lsp could not enable the project: ${errorMessage(error)}`);
   }
 }
 export {

@@ -6,7 +6,8 @@ import { basename, dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
-import { ConfigureManager, probeCmake, type Exec } from "../packages/core/src/project/configure.ts";
+import type { Exec } from "../packages/core/src/exec.ts";
+import { ConfigureManager, probeCmake } from "../packages/core/src/project/configure.ts";
 import {
   declaringLocation, effectiveStandard, findTarget, formatStandard, loadProjectModel, ownersOf, ProjectModelError,
   type ProjectModel, type ProjectTarget,

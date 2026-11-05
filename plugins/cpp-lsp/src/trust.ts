@@ -1,12 +1,12 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { writeJsonAtomic } from "../../../packages/core/src/files.ts";
 
 /**
  * The CMake projects the user enabled the plugin for, as their real source-root paths. It lives in
  * the plugin's data directory, which survives plugin updates, so a project is enabled once.
  */
-export const TRUST_FILE = "trusted.json";
+const TRUST_FILE = "trusted.json";
 
 export const trustFile = (dataDir: string) => join(dataDir, TRUST_FILE);
 
@@ -29,11 +29,7 @@ export function isTrusted(dataDir: string | undefined, root: string): boolean {
 export function addTrusted(dataDir: string, root: string): boolean {
   const roots = readTrusted(dataDir);
   if (roots.includes(root)) return false;
-  mkdirSync(dataDir, { recursive: true });
   // A server reads the list on every call, so it must never see a half-written file.
-  const path = trustFile(dataDir);
-  const temp = `${path}.${randomUUID()}.tmp`;
-  writeFileSync(temp, `${JSON.stringify([...roots, root], null, 2)}\n`);
-  renameSync(temp, path);
+  writeJsonAtomic(trustFile(dataDir), [...roots, root]);
   return true;
 }

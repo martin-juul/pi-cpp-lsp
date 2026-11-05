@@ -1,11 +1,12 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { Exec } from "../exec.ts";
 import {
   BRIEFING_BUDGET, describeFinding, describeResolved, configureErrorExcerpt, displayPath, featureCheckRunning, featureUpdateLines, renderBriefing,
   type FeatureState, type ProjectStatus,
 } from "./briefing.ts";
 import {
-  ConfigureManager, isSupportedCmake, PRESET_FILES, probeCmake, resolvePreset, type CmakeVersion, type ConfigureResult, type Exec,
+  ConfigureManager, isSupportedCmake, PRESET_FILES, probeCmake, resolvePreset, type CmakeVersion, type ConfigureResult,
 } from "./configure.ts";
 import { FindingsLedger, findingKey, scanDrift, type DriftFinding, type DriftReport, type ReferencedSource, type UnregisteredFinding } from "./drift.ts";
 import { effectiveStandard, formatStandard, isInSkippedDir, isWithin, loadProjectModel, ownersOf, type ProjectModel } from "./model.ts";

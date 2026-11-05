@@ -52,14 +52,12 @@ async function prompt(plugin: CppPlugin): Promise<string | undefined> {
  * it does not format the user's files or start clangd there.
  */
 async function postEdit(plugin: CppPlugin, file: unknown): Promise<string | undefined> {
-  if (plugin.untrusted()) return undefined;
-  const session = plugin.current();
-  return typeof file === "string" && file ? session.postEditNote(file) : session.afterShell();
+  if (typeof file !== "string" || !file) return afterShell(plugin);
+  return plugin.activeSession()?.postEditNote(file);
 }
 
 async function afterShell(plugin: CppPlugin): Promise<string | undefined> {
-  if (plugin.untrusted()) return undefined;
-  return plugin.current().afterShell();
+  return plugin.activeSession()?.afterShell();
 }
 
 /** Runs the hook tool `name`, or returns undefined when `name` is not one. */

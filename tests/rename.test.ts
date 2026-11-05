@@ -9,8 +9,8 @@ import { pathToFileURL } from "node:url";
 import type { ExecOptions, ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ProjectService } from "../packages/core/src/project/session.ts";
 import type { ProjectModel } from "../packages/core/src/project/model.ts";
-import type { Exec } from "../packages/core/src/project/configure.ts";
-import { registerClangdTools, registerRenameTool, type ClangdToolOptions, type RenameToolOptions } from "../extensions/register.ts";
+import type { Exec } from "../packages/core/src/exec.ts";
+import { registerClangdTools, registerRenameTool, type ClangdToolOptions, type RenameToolOptions } from "./support/register.ts";
 
 const mock = resolve("tests/fixtures/mock-clangd.mjs");
 

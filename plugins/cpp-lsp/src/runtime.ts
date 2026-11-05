@@ -24,6 +24,11 @@ export function usePluginWording(): void {
   configureHarness({ notePrefix: "cpp-lsp:", presetCommand: "/cpp-lsp:cpp-preset", logName: "cpp-lsp", cacheName: "cpp-lsp-claude" });
 }
 
+/** The message of a caught error, or the thrown value as text. */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /** Whether the module at `moduleUrl` is the script node was started with, rather than an import. */
 export function isEntry(moduleUrl: string): boolean {
   const entry = process.argv[1];

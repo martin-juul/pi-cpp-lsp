@@ -1,7 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { writeJsonAtomic } from "../files.ts";
 import { harness } from "../harness.ts";
 
 const hasCMakeLists = (dir: string) => existsSync(join(dir, "CMakeLists.txt"));
@@ -87,9 +88,5 @@ export function readProjectState(sourceRoot: string): ProjectState {
 
 /** Remember the user's preset choice for this project; undefined forgets it. */
 export function writeRememberedPreset(sourceRoot: string, preset: string | undefined): void {
-  const path = statePath(sourceRoot);
-  mkdirSync(dirname(path), { recursive: true });
-  const temp = `${path}.${randomUUID()}.tmp`;
-  writeFileSync(temp, `${JSON.stringify({ sourceRoot: realpathSync(sourceRoot), preset }, null, 2)}\n`);
-  renameSync(temp, path);
+  writeJsonAtomic(statePath(sourceRoot), { sourceRoot: realpathSync(sourceRoot), preset });
 }

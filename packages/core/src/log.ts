@@ -3,9 +3,6 @@ import { join } from "node:path";
 import { harness } from "./harness.ts";
 import { projectCacheDir } from "./project/root.ts";
 
-/** pi's log file in the project's managed cache directory, for what the extension could not do. */
-export const LOG_FILE = "pi-cpp-lsp.log";
-
 /** The current harness's log file name. */
 export const logFileName = () => `${harness.logName}.log`;
 

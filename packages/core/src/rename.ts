@@ -9,7 +9,7 @@ import {
   uncheckedEntry, type CompilerCheck, type CompilerProblem, type PostEditOptions,
 } from "./diagnostics.ts";
 import { plural } from "./output.ts";
-import type { Exec } from "./project/configure.ts";
+import type { Exec } from "./exec.ts";
 import { loadCompilationDatabase, type CompilationEntry } from "./compdb.ts";
 import { bestRealPath, findTarget, isInSkippedDir, isWithin, ownersOf, type ProjectModel } from "./project/model.ts";
 import { projectCacheDir } from "./project/root.ts";
