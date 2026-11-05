@@ -29,7 +29,8 @@
   ],
   "type": "module",
   "workspaces": [
-    "packages/core"
+    "packages/core",
+    "plugins/cpp-lsp"
   ],
   "files": [
     "extensions",
@@ -42,7 +43,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/*.test.ts"
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "build:plugin": "npm run build --workspace plugins/cpp-lsp"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

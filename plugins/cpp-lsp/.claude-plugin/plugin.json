@@ -1,0 +1,13 @@
+{
+  "name": "cpp-lsp",
+  "version": "1.0.0",
+  "description": "C/C++ support for Claude Code: a CMake project briefing, post-edit format and diagnostics notes with the build compiler's check, CMake drift detection, and clangd-backed navigation, rename, build and test tools",
+  "author": {
+    "name": "Martin Juul Christiansen",
+    "email": "code@juul.xyz"
+  },
+  "homepage": "https://github.com/martin-juul/pi-cpp-lsp#readme",
+  "repository": "https://github.com/martin-juul/pi-cpp-lsp",
+  "license": "Apache-2.0",
+  "keywords": ["c", "cpp", "c++", "clangd", "cmake", "lsp", "clang-format", "clang-tidy"]
+}

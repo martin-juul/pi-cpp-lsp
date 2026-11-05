@@ -1,9 +1,14 @@
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { harness } from "./harness.ts";
 import { projectCacheDir } from "./project/root.ts";
 
-/** The log in the project's managed cache directory, for what the extension could not do. */
+/** pi's log file in the project's managed cache directory, for what the extension could not do. */
 export const LOG_FILE = "pi-cpp-lsp.log";
+
+/** The current harness's log file name. */
+export const logFileName = () => `${harness.logName}.log`;
+
 /** Past this size, the log keeps its newer half. */
 const MAX_LOG_BYTES = 512 * 1024;
 
@@ -20,7 +25,7 @@ export function projectLog(root: string): Log {
     try {
       const dir = projectCacheDir(root);
       mkdirSync(dir, { recursive: true });
-      const file = join(dir, LOG_FILE);
+      const file = join(dir, logFileName());
       let size = 0;
       try { size = statSync(file).size; } catch { /* no log yet */ }
       if (size > MAX_LOG_BYTES) {

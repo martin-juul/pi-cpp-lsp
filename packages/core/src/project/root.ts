@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { harness } from "../harness.ts";
 
 const hasCMakeLists = (dir: string) => existsSync(join(dir, "CMakeLists.txt"));
 
@@ -49,7 +50,7 @@ function cacheHome(): string {
 /** The managed state directory for a project (KTD2), keyed by a hash of the real source-root path. */
 export function projectCacheDir(sourceRoot: string): string {
   const hash = createHash("sha256").update(realpathSync(sourceRoot)).digest("hex").slice(0, 16);
-  return join(cacheHome(), "pi-cpp-lsp", hash);
+  return join(cacheHome(), harness.cacheName, hash);
 }
 
 /** The managed build directory for a preset, or for configuring without one. */

@@ -1,6 +1,7 @@
 import type { Exec } from "./exec.ts";
 import { isSupportedCmake, probeCmake, supportsPresets, type CmakeVersion } from "./project/configure.ts";
 import { setupFeatureLines, type ToolchainServiceOptions } from "./toolchain.ts";
+import { harness } from "./harness.ts";
 
 /** The clangd major version that first supports each navigation feature (see navigation.ts). */
 const CLANGD_FEATURES: { feature: string; major: number }[] = [
@@ -24,7 +25,7 @@ export function cmakeFeatures(cmake: CmakeVersion): string[] {
     isSupportedCmake(cmake)
       ? "  ✓ project model (briefing, drift, managed build)"
       : "  ✗ project model: needs CMake 3.14 or newer; CMake projects are treated like non-CMake ones",
-    supportsPresets(cmake) ? "  ✓ presets (/cpp-preset)" : "  ✗ presets: need CMake 3.19 or newer",
+    supportsPresets(cmake) ? `  ✓ presets (${harness.presetCommand})` : "  ✗ presets: need CMake 3.19 or newer",
   ];
 }
 

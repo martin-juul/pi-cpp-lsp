@@ -6,6 +6,7 @@ import { findTarget, formatStandard, type ProjectModel, type ProjectTarget } fro
 import { writeRememberedPreset } from "./root.ts";
 import type { PresetChoice, ProjectService } from "./session.ts";
 import { defineTool, type ToolSpec } from "../tools.ts";
+import { harness } from "../harness.ts";
 
 const ACTIONS = ["overview", "targets", "target", "owner", "refresh", "presets"] as const;
 type Action = typeof ACTIONS[number];
@@ -22,8 +23,6 @@ interface Details {
   truncated: boolean;
   logFile?: string;
 }
-
-const NOTE_PREFIX = "pi-cpp-lsp:";
 
 const list = (items: readonly string[]) => items.length > 0 ? items.join(", ") : "-";
 const projectTargets = (model: ProjectModel) => model.targets.filter(target => target.isProjectTarget);
@@ -139,7 +138,7 @@ export function projectToolSpec(getProject: () => ProjectService | undefined): T
     if (params.action === "presets") {
       const choice = await project.presets();
       if (!choice) return { text: `The configure presets for ${root} are unavailable.`, isError: true, status: project.status };
-      const lines = presetListing(root, choice, "Configure presets for", "Only the user can switch presets, with the /cpp-preset <name> command; cpp_project only lists them.");
+      const lines = presetListing(root, choice, "Configure presets for", `Only the user can switch presets, with the ${harness.presetCommand} <name> command; cpp_project only lists them.`);
       return { text: lines.join("\n"), isError: false, status: project.status };
     }
     if (project.status === "configuring") return { text: loading(project), isError: false, status: "configuring" };
@@ -185,7 +184,7 @@ export function projectToolSpec(getProject: () => ProjectService | undefined): T
       "Query the CMake project model the extension configures. Actions: overview (the full project briefing: targets, standards, drift, notes), " +
       "targets (list targets), target (one target's sources, include directories, defines, standard and dependencies; needs name), " +
       "owner (the targets that build a file and the C++ standard it must stay valid for; needs path), refresh (reconfigure now and return the result), " +
-      "presets (list the configure presets, the active one and the default; read-only, the user switches presets with /cpp-preset).",
+      `presets (list the configure presets, the active one and the default; read-only, the user switches presets with ${harness.presetCommand}).`,
     promptSnippet: "Query the CMake project: targets, a target's sources/flags/standard, a file's owning targets, configure presets, or force a reconfigure",
     parameters: Type.Object({
       action: Type.Enum([...ACTIONS], { description: "overview | targets | target | owner | refresh | presets" }),
@@ -211,7 +210,7 @@ export async function presetCommand(project: ProjectService | undefined, args: s
   await project?.ready();
   const reason = unsupported(project, cwd);
   if (reason || !project) {
-    notify(`${NOTE_PREFIX} ${reason}`, "warning");
+    notify(`${harness.notePrefix} ${reason}`, "warning");
     return;
   }
   const choice = await project.presets();
@@ -219,19 +218,19 @@ export async function presetCommand(project: ProjectService | undefined, args: s
   const root = project.root!;
   const name = args.trim();
   if (choice.available.length === 0 || !name) {
-    notify(`${NOTE_PREFIX} ${presetListing(root, choice, "configure presets for", "Switch with /cpp-preset <name>.").join("\n")}`, name ? "warning" : "info");
+    notify(`${harness.notePrefix} ${presetListing(root, choice, "configure presets for", `Switch with ${harness.presetCommand} <name>.`).join("\n")}`, name ? "warning" : "info");
     return;
   }
   if (!choice.available.includes(name)) {
-    notify(`${NOTE_PREFIX} no configure preset named "${name}"; nothing changed. Available presets: ${choice.available.join(", ")}.`, "warning");
+    notify(`${harness.notePrefix} no configure preset named "${name}"; nothing changed. Available presets: ${choice.available.join(", ")}.`, "warning");
     return;
   }
   writeRememberedPreset(root, name);
-  notify(`${NOTE_PREFIX} using preset ${name} for ${root}; reconfiguring.`, "info");
+  notify(`${harness.notePrefix} using preset ${name} for ${root}; reconfiguring.`, "info");
   await project.reconfigureNow();
   // The next run carries the full briefing, which names the new preset.
   project.resendBriefing();
   const result = project.lastConfigure;
-  if (project.status === "ready") notify(`${NOTE_PREFIX} CMake configure with preset ${name} succeeded.`, "info");
-  else notify(`${NOTE_PREFIX} CMake configure with preset ${name} did not succeed.${result && result.status !== "succeeded" ? `\n${configureErrorExcerpt(result)}` : ""}`, "error");
+  if (project.status === "ready") notify(`${harness.notePrefix} CMake configure with preset ${name} succeeded.`, "info");
+  else notify(`${harness.notePrefix} CMake configure with preset ${name} did not succeed.${result && result.status !== "succeeded" ? `\n${configureErrorExcerpt(result)}` : ""}`, "error");
 }

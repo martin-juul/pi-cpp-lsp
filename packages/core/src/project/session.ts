@@ -10,6 +10,7 @@ import {
 import { FindingsLedger, findingKey, scanDrift, type DriftFinding, type DriftReport, type ReferencedSource, type UnregisteredFinding } from "./drift.ts";
 import { effectiveStandard, formatStandard, isInSkippedDir, isWithin, loadProjectModel, ownersOf, type ProjectModel } from "./model.ts";
 import { findSourceRoot, projectCacheDir } from "./root.ts";
+import { harness } from "../harness.ts";
 
 export type { ProjectStatus } from "./briefing.ts";
 
@@ -30,6 +31,8 @@ export interface UntrustedWording {
   reason: string;
   /** Completes "To enable it, …". */
   steps: string;
+  /** How long support stays off, completing "… are off …"; pi needs a restart, so "for this session". */
+  until?: string;
 }
 
 const UNTRUSTED: UntrustedWording = {
@@ -174,7 +177,7 @@ export class ProjectService {
       this.nonCmake = true;
       this.nonCmakeReason = reason;
       this.nonCmakeHint = `To enable it, ${steps}.`;
-      options.notify?.(`pi-cpp-lsp: ${this.root} is a CMake project, but ${reason}. Project briefing and drift detection are off for this session; to enable them, ${steps}.`, "warning");
+      options.notify?.(`${harness.notePrefix} ${this.root} is a CMake project, but ${reason}. Project briefing and drift detection are off ${options.untrusted?.until ?? "for this session"}; to enable them, ${steps}.`, "warning");
     }
     this.initialized = this.root === undefined || this.nonCmake ? Promise.resolve() : this.initialize(this.root, options.notify);
   }
@@ -187,7 +190,7 @@ export class ProjectService {
       this.nonCmakeReason = cmake
         ? `CMake ${cmake.text} is older than 3.14, which the project model needs`
         : "cmake was not found on PATH";
-      notify?.(`pi-cpp-lsp: ${root} is a CMake project, but ${this.nonCmakeReason}. Project briefing and drift detection are off for this session; install CMake 3.14 or newer to enable them.`, "warning");
+      notify?.(`${harness.notePrefix} ${root} is a CMake project, but ${this.nonCmakeReason}. Project briefing and drift detection are off for this session; install CMake 3.14 or newer to enable them.`, "warning");
       return;
     }
     this.cmake = cmake;

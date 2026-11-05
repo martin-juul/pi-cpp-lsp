@@ -20,6 +20,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - name: Check the committed plugin bundle is fresh
+        # A marketplace install copies only the plugin directory, so the server ships prebuilt.
+        run: |
+          npm run build:plugin
+          git diff --exit-code plugins/cpp-lsp/server
+          test -z "$(git status --porcelain plugins/cpp-lsp/server)"
       - name: Install integration test toolchain
         # Ubuntu's clangd 18 lacks outgoing calls; clangd 21 from apt.llvm.org runs every navigation test.
         run: |

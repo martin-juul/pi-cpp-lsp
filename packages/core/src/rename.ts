@@ -17,6 +17,7 @@ import type { ProjectService } from "./project/session.ts";
 import type { Log } from "./log.ts";
 import { mapLimited, type TargetProfile, type ToolchainService } from "./toolchain.ts";
 import { defineTool, type ToolSpec } from "./tools.ts";
+import { harness } from "./harness.ts";
 
 /** How long a rename waits for clangd's background index to become idle (KTD14 step 2). */
 export const INDEX_WAIT_MS = 30_000;
@@ -161,7 +162,7 @@ function buildCheckLines(check: BuildCheck, changed: Set<string>, limitMs: numbe
   if (check.unchecked.length > 0) log?.(`after a rename: not checked within ${Math.round(limitMs / 100) / 10}s: ${check.unchecked.join(", ")}`);
   if (check.broken) lines.push("  the build may be broken: fix these errors; the rename was not undone");
   else if (check.unchecked.length === 0 && check.failed.length === 0) lines.push("  no errors");
-  if (check.failed.length > 0 || check.unchecked.length > 0) lines.push(`  ${check.unchecked.length > 0 ? `not every file was checked within ${Math.round(limitMs / 100) / 10}s` : `${plural(check.failed.length, "file")} could not be checked`}; see the pi-cpp-lsp log`);
+  if (check.failed.length > 0 || check.unchecked.length > 0) lines.push(`  ${check.unchecked.length > 0 ? `not every file was checked within ${Math.round(limitMs / 100) / 10}s` : `${plural(check.failed.length, "file")} could not be checked`}; see the ${harness.logName} log`);
   return lines;
 }
 
