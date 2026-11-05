@@ -5409,9 +5409,13 @@ function isEntry(moduleUrl) {
     return false;
   }
 }
+var EXIT_STDIO_GRACE_MS = 100;
 var nodeExec = (command, args, options = {}) => new Promise((resolve5) => {
   let stdout = "", stderr = "", killed = false;
   let timer;
+  let idle;
+  let exitCode = null;
+  let exited = false, stdoutEnded = false, stderrEnded = false;
   const child = spawn2(command, args, { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
   const kill = () => {
     if (killed) return;
@@ -5426,20 +5430,47 @@ var nodeExec = (command, args, options = {}) => new Promise((resolve5) => {
     if (done) return;
     done = true;
     clearTimeout(timer);
+    clearTimeout(idle);
     options.signal?.removeEventListener("abort", kill);
+    child.stdout.destroy();
+    child.stderr.destroy();
     resolve5({ stdout, stderr, code, killed });
+  };
+  const exitedCode = () => exitCode ?? 1;
+  const armIdle = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => finish(exitedCode()), EXIT_STDIO_GRACE_MS);
+  };
+  const finishIfDrained = () => {
+    if (exited && stdoutEnded && stderrEnded) finish(exitedCode());
   };
   if (options.signal?.aborted) kill();
   else options.signal?.addEventListener("abort", kill, { once: true });
   if (options.timeout && options.timeout > 0) timer = setTimeout(kill, options.timeout);
   child.stdout.on("data", (data) => {
     stdout += data;
+    if (exited) armIdle();
   });
   child.stderr.on("data", (data) => {
     stderr += data;
+    if (exited) armIdle();
+  });
+  child.stdout.once("end", () => {
+    stdoutEnded = true;
+    finishIfDrained();
+  });
+  child.stderr.once("end", () => {
+    stderrEnded = true;
+    finishIfDrained();
   });
   child.on("error", () => finish(127));
-  child.on("close", (code) => finish(code ?? 1));
+  child.once("exit", (code) => {
+    exited = true;
+    exitCode = code;
+    finishIfDrained();
+    if (!done) armIdle();
+  });
+  child.once("close", (code) => finish(code ?? 1));
 });
 
 // src/bin/setup.ts

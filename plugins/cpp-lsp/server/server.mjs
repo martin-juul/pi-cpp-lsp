@@ -29825,9 +29825,13 @@ function isEntry2(moduleUrl) {
     return false;
   }
 }
+var EXIT_STDIO_GRACE_MS = 100;
 var nodeExec = (command, args, options = {}) => new Promise((resolve14) => {
   let stdout = "", stderr = "", killed = false;
   let timer;
+  let idle;
+  let exitCode = null;
+  let exited = false, stdoutEnded = false, stderrEnded = false;
   const child = spawn2(command, args, { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
   const kill = () => {
     if (killed) return;
@@ -29842,20 +29846,47 @@ var nodeExec = (command, args, options = {}) => new Promise((resolve14) => {
     if (done) return;
     done = true;
     clearTimeout(timer);
+    clearTimeout(idle);
     options.signal?.removeEventListener("abort", kill);
+    child.stdout.destroy();
+    child.stderr.destroy();
     resolve14({ stdout, stderr, code, killed });
+  };
+  const exitedCode = () => exitCode ?? 1;
+  const armIdle = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => finish(exitedCode()), EXIT_STDIO_GRACE_MS);
+  };
+  const finishIfDrained = () => {
+    if (exited && stdoutEnded && stderrEnded) finish(exitedCode());
   };
   if (options.signal?.aborted) kill();
   else options.signal?.addEventListener("abort", kill, { once: true });
   if (options.timeout && options.timeout > 0) timer = setTimeout(kill, options.timeout);
   child.stdout.on("data", (data) => {
     stdout += data;
+    if (exited) armIdle();
   });
   child.stderr.on("data", (data) => {
     stderr += data;
+    if (exited) armIdle();
+  });
+  child.stdout.once("end", () => {
+    stdoutEnded = true;
+    finishIfDrained();
+  });
+  child.stderr.once("end", () => {
+    stderrEnded = true;
+    finishIfDrained();
   });
   child.on("error", () => finish(127));
-  child.on("close", (code) => finish(code ?? 1));
+  child.once("exit", (code) => {
+    exited = true;
+    exitCode = code;
+    finishIfDrained();
+    if (!done) armIdle();
+  });
+  child.once("close", (code) => finish(code ?? 1));
 });
 
 // src/trust.ts
@@ -29882,28 +29913,31 @@ var SERVER_VERSION = "1.0.0";
 var CLAUDE_LIST_TIMEOUT_MS = 1e4;
 var CppPlugin = class {
   projectDir;
-  /** The CMake source root, or undefined outside a CMake project. */
-  root;
   tools;
-  /** Settles once the check for Claude Code's own clangd-lsp plugin has run. */
+  /** Settles once the check for Claude Code's own clangd-lsp plugin has run for the current CMake root. */
   coexistence;
   options;
   session;
+  sourceRoot;
   trusted;
   notices = [];
   constructor(options) {
     usePluginWording();
     this.options = options;
     this.projectDir = options.projectDir;
-    this.root = findSourceRoot(options.projectDir);
-    this.trusted = this.readTrust();
+    this.sourceRoot = findSourceRoot(options.projectDir);
+    this.trusted = this.readTrust(this.sourceRoot);
     this.session = this.build();
     this.tools = cppTools(() => this.session, { exec: options.exec, clangd: options.clangd, ...options.diagnostics });
     this.coexistence = this.checkClangdLsp();
   }
+  /** The CMake source root of the current session, or undefined outside a CMake project. */
+  get root() {
+    return this.sourceRoot;
+  }
   /** Outside a CMake project there is nothing to enable, so the tools behave as in pi. */
-  readTrust() {
-    return this.root === void 0 || isTrusted(this.options.dataDir, this.root);
+  readTrust(root) {
+    return root === void 0 || isTrusted(this.options.dataDir, root);
   }
   build() {
     const { projectDir, exec, waitMs, diagnostics, toolchain, clangd } = this.options;
@@ -29924,15 +29958,21 @@ var CppPlugin = class {
     });
   }
   /**
-   * The session for this call. The trust list is read on every call, so `/cpp-lsp:trust` takes
-   * effect in the running session; the new session's first prompt carries the briefing.
+   * The session for this call. The CMake root and the trust list are looked up on every call, so a
+   * CMake project that appears mid-session (a clone into the project directory) needs enabling
+   * before anything runs in it, and `/cpp-lsp:trust` takes effect in the running session; the new
+   * session's first prompt carries the briefing or the untrusted notice.
    */
   current() {
-    const trusted = this.readTrust();
-    if (trusted !== this.trusted) {
+    const root = findSourceRoot(this.projectDir);
+    const trusted = this.readTrust(root);
+    if (root !== this.sourceRoot || trusted !== this.trusted) {
+      const rootChanged = root !== this.sourceRoot;
+      this.sourceRoot = root;
       this.trusted = trusted;
       void this.session.dispose();
       this.session = this.build();
+      if (rootChanged) this.coexistence = this.checkClangdLsp();
     }
     return this.session;
   }
@@ -29959,7 +29999,8 @@ var CppPlugin = class {
   }
   /** The guidance for the whole session, sent once in the MCP handshake. */
   async instructions() {
-    const guidelines = await this.current().guidelines();
+    const session = this.current();
+    const guidelines = this.trusted || this.root === void 0 ? await session.guidelines() : [STANDARD_GUIDELINE];
     const names = this.tools.specs.map((spec) => spec.name).join(", ");
     return [
       ...guidelines,

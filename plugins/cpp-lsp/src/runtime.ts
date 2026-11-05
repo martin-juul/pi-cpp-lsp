@@ -40,13 +40,23 @@ export function isEntry(moduleUrl: string): boolean {
   }
 }
 
+/** How long the output pipes may stay quiet after the program exits before they are dropped, as in pi. */
+const EXIT_STDIO_GRACE_MS = 100;
+
 /**
  * Runs a program the way pi's exec does: no shell, no stdin, SIGTERM on timeout or abort and SIGKILL
  * five seconds later. A program that cannot start is a failed run, never a thrown error.
+ *
+ * The run ends when the program exits and its output pipes close. A background process the program
+ * left running can hold those pipes open indefinitely, so once the program has exited and the pipes
+ * stay quiet for a moment, they are dropped and the run ends anyway.
  */
 export const nodeExec: Exec = (command, args, options = {}) => new Promise<ExecResult>(resolve => {
   let stdout = "", stderr = "", killed = false;
   let timer: NodeJS.Timeout | undefined;
+  let idle: NodeJS.Timeout | undefined;
+  let exitCode: number | null = null;
+  let exited = false, stdoutEnded = false, stderrEnded = false;
   const child = spawn(command, args, { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
   const kill = () => {
     if (killed) return;
@@ -59,13 +69,31 @@ export const nodeExec: Exec = (command, args, options = {}) => new Promise<ExecR
     if (done) return;
     done = true;
     clearTimeout(timer);
+    clearTimeout(idle);
     options.signal?.removeEventListener("abort", kill);
+    child.stdout.destroy();
+    child.stderr.destroy();
     resolve({ stdout, stderr, code, killed });
   };
+  const exitedCode = () => exitCode ?? 1;
+  const armIdle = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => finish(exitedCode()), EXIT_STDIO_GRACE_MS);
+  };
+  const finishIfDrained = () => { if (exited && stdoutEnded && stderrEnded) finish(exitedCode()); };
   if (options.signal?.aborted) kill(); else options.signal?.addEventListener("abort", kill, { once: true });
   if (options.timeout && options.timeout > 0) timer = setTimeout(kill, options.timeout);
-  child.stdout.on("data", data => { stdout += data; });
-  child.stderr.on("data", data => { stderr += data; });
+  // Output still arriving after the exit keeps the run open, so its tail is not cut off.
+  child.stdout.on("data", data => { stdout += data; if (exited) armIdle(); });
+  child.stderr.on("data", data => { stderr += data; if (exited) armIdle(); });
+  child.stdout.once("end", () => { stdoutEnded = true; finishIfDrained(); });
+  child.stderr.once("end", () => { stderrEnded = true; finishIfDrained(); });
   child.on("error", () => finish(127));
-  child.on("close", code => finish(code ?? 1));
+  child.once("exit", code => {
+    exited = true;
+    exitCode = code;
+    finishIfDrained();
+    if (!done) armIdle();
+  });
+  child.once("close", code => finish(code ?? 1));
 });

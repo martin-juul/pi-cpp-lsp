@@ -9,7 +9,7 @@ import type { Exec } from "../../../packages/core/src/exec.ts";
 import { projectLog } from "../../../packages/core/src/log.ts";
 import { findSourceRoot } from "../../../packages/core/src/project/root.ts";
 import { presetCommand } from "../../../packages/core/src/project/tools.ts";
-import { CppSession } from "../../../packages/core/src/session.ts";
+import { CppSession, STANDARD_GUIDELINE } from "../../../packages/core/src/session.ts";
 import type { ToolchainServiceOptions } from "../../../packages/core/src/toolchain.ts";
 import { cppTools, defineTool, type CppTools, type ToolSpec } from "../../../packages/core/src/tools.ts";
 import { HOOK_TOOLS, runHook } from "./hooks.ts";
@@ -50,13 +50,12 @@ interface Notice {
  */
 export class CppPlugin {
   readonly projectDir: string;
-  /** The CMake source root, or undefined outside a CMake project. */
-  readonly root?: string;
   readonly tools: CppTools;
-  /** Settles once the check for Claude Code's own clangd-lsp plugin has run. */
-  readonly coexistence: Promise<void>;
+  /** Settles once the check for Claude Code's own clangd-lsp plugin has run for the current CMake root. */
+  coexistence: Promise<void>;
   private readonly options: PluginOptions;
   private session: CppSession;
+  private sourceRoot: string | undefined;
   private trusted: boolean;
   private notices: Notice[] = [];
 
@@ -64,16 +63,21 @@ export class CppPlugin {
     usePluginWording();
     this.options = options;
     this.projectDir = options.projectDir;
-    this.root = findSourceRoot(options.projectDir);
-    this.trusted = this.readTrust();
+    this.sourceRoot = findSourceRoot(options.projectDir);
+    this.trusted = this.readTrust(this.sourceRoot);
     this.session = this.build();
     this.tools = cppTools(() => this.session, { exec: options.exec, clangd: options.clangd, ...options.diagnostics });
     this.coexistence = this.checkClangdLsp();
   }
 
+  /** The CMake source root of the current session, or undefined outside a CMake project. */
+  get root(): string | undefined {
+    return this.sourceRoot;
+  }
+
   /** Outside a CMake project there is nothing to enable, so the tools behave as in pi. */
-  private readTrust(): boolean {
-    return this.root === undefined || isTrusted(this.options.dataDir, this.root);
+  private readTrust(root: string | undefined): boolean {
+    return root === undefined || isTrusted(this.options.dataDir, root);
   }
 
   private build(): CppSession {
@@ -90,15 +94,21 @@ export class CppPlugin {
   }
 
   /**
-   * The session for this call. The trust list is read on every call, so `/cpp-lsp:trust` takes
-   * effect in the running session; the new session's first prompt carries the briefing.
+   * The session for this call. The CMake root and the trust list are looked up on every call, so a
+   * CMake project that appears mid-session (a clone into the project directory) needs enabling
+   * before anything runs in it, and `/cpp-lsp:trust` takes effect in the running session; the new
+   * session's first prompt carries the briefing or the untrusted notice.
    */
   current(): CppSession {
-    const trusted = this.readTrust();
-    if (trusted !== this.trusted) {
+    const root = findSourceRoot(this.projectDir);
+    const trusted = this.readTrust(root);
+    if (root !== this.sourceRoot || trusted !== this.trusted) {
+      const rootChanged = root !== this.sourceRoot;
+      this.sourceRoot = root;
       this.trusted = trusted;
       void this.session.dispose();
       this.session = this.build();
+      if (rootChanged) this.coexistence = this.checkClangdLsp();
     }
     return this.session;
   }
@@ -130,7 +140,10 @@ export class CppPlugin {
 
   /** The guidance for the whole session, sent once in the MCP handshake. */
   async instructions(): Promise<string> {
-    const guidelines = await this.current().guidelines();
+    const session = this.current();
+    // A CMake project the user has not enabled is no plain directory: telling Claude to make
+    // compile_commands.json there would steer it into running the project's CMake by hand.
+    const guidelines = this.trusted || this.root === undefined ? await session.guidelines() : [STANDARD_GUIDELINE];
     const names = this.tools.specs.map(spec => spec.name).join(", ");
     return [
       ...guidelines,

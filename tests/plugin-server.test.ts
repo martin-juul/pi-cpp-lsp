@@ -6,13 +6,14 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Exec, ExecOptions, ExecResult } from "../packages/core/src/exec.ts";
 import { projectCacheDir, readProjectState } from "../packages/core/src/project/root.ts";
 import { STANDARD_GUIDELINE } from "../packages/core/src/session.ts";
 import { cppTools } from "../packages/core/src/tools.ts";
 import { CppPlugin, createServer, type PluginOptions } from "../plugins/cpp-lsp/src/server.ts";
-import { addTrusted } from "../plugins/cpp-lsp/src/trust.ts";
+import { addTrusted, trustFile } from "../plugins/cpp-lsp/src/trust.ts";
 
 // Feature probes and caches stay private to this file, so test files running at the same time
 // never count or reuse each other's.
@@ -148,6 +149,9 @@ test("in a CMake project the user has not enabled, the first prompt carries one 
   const root = untrustedProject();
   const { calls, exec } = recordingExec();
   const s = await connect(t, { projectDir: root, dataDir: dataDir(), exec });
+  const instructions = s.client.getInstructions()!;
+  assert.ok(instructions.startsWith(`${STANDARD_GUIDELINE}\n`), instructions);
+  assert.doesNotMatch(instructions, /compile_commands\.json exists/);
 
   const first = await s.hook("cpp_hook_prompt", {}, "UserPromptSubmit");
   assert.equal(first, `cpp-lsp: ${root} is a CMake project, but the cpp-lsp plugin is not enabled for it, and configuring it would run the project's CMake code. Project briefing and drift detection are off until you enable the plugin here; to enable them, run /cpp-lsp:trust.`);
@@ -171,6 +175,64 @@ test("in a CMake project the user has not enabled, the first prompt carries one 
   assert.equal(await s.hook("cpp_hook_prompt"), first);
   assert.equal(await s.hook("cpp_hook_prompt"), undefined);
   assert.deepEqual(readdirSync(root).sort(), ["CMakeLists.txt", "src"]);
+});
+
+/** Every program but `claude` fails to start, so a configure fails at once and nothing real runs. */
+const nothingRuns = () => recordingExec({ compiler: async () => missing });
+
+test("a CMake project that appears mid-session needs enabling before anything runs in it", async t => {
+  freshCache();
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "cpp-lsp-clone-")));
+  const data = dataDir();
+  const { calls, exec } = nothingRuns();
+  const s = await connect(t, { projectDir: root, dataDir: data, exec });
+  assert.equal(s.plugin.root, undefined);
+  await s.hook("cpp_hook_prompt");
+
+  // A clone into the project directory brings the CMake project in.
+  mkdirSync(join(root, "src"));
+  writeFileSync(join(root, "CMakeLists.txt"), "cmake_minimum_required(VERSION 3.14)\nproject(cloned CXX)\nadd_executable(app src/main.cpp)\n");
+  writeFileSync(join(root, "src", "main.cpp"), "int main() { return 0; }\n");
+  calls.length = 0;
+  for (const name of ["cpp_gen_compdb", "cpp_build", "cpp_test"]) {
+    const result = await s.call(name);
+    assert.equal(result.isError, true, name);
+    assert.match(result.text, /is a CMake project, but the cpp-lsp plugin is not enabled for it.*Nothing ran\./, name);
+  }
+  assert.deepEqual(calls, [], "nothing ran");
+  assert.equal(s.plugin.root, root);
+  assert.match((await s.hook("cpp_hook_prompt"))!, new RegExp(`^cpp-lsp: ${root} is a CMake project, .*run /cpp-lsp:trust\\.$`));
+
+  addTrusted(data, root);
+  assert.ok(s.plugin.activeSession(), "enabling the new project takes effect in the running session");
+});
+
+test("disabling the project mid-session closes the gate again", async t => {
+  freshCache();
+  const root = untrustedProject();
+  const data = dataDir();
+  addTrusted(data, root);
+  const { calls, exec } = nothingRuns();
+  const s = await connect(t, { projectDir: root, dataDir: data, exec });
+  assert.doesNotMatch((await s.call("cpp_project", { action: "overview" })).text, /not enabled/);
+
+  writeFileSync(trustFile(data), "[]\n");
+  calls.length = 0;
+  const result = await s.call("cpp_build");
+  assert.equal(result.isError, true);
+  assert.match(result.text, /is a CMake project, but the cpp-lsp plugin is not enabled for it/);
+  assert.deepEqual(calls, [], "nothing ran");
+  assert.match((await s.hook("cpp_hook_prompt"))!, /run \/cpp-lsp:trust\.$/);
+});
+
+test("an unknown tool and invalid arguments are errors the model can read", async t => {
+  freshCache();
+  const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "cpp-lsp-plain-")));
+  const s = await connect(t, { projectDir, exec: nothingRuns().exec });
+  assert.deepEqual(await s.call("cpp_nope"), { text: "Unknown tool: cpp_nope", isError: true });
+  const invalid = await s.call("cpp_hover", { file: "main.cpp" });
+  assert.equal(invalid.isError, true);
+  assert.match(invalid.text, /^Invalid arguments for cpp_hover:\n  - /);
 });
 
 test("the trusted multi project: briefing once, the post-edit note, drift after a shell command, and the briefing again after compact and clear", { skip: !hasCmake }, async t => {
@@ -361,4 +423,25 @@ test("the plugin's hooks call its own server's hook tools, and its manifest name
   const s = await connect(t, { projectDir: realpathSync(mkdtempSync(join(tmpdir(), "cpp-lsp-plain-"))), exec: recordingExec().exec });
   const { tools } = await s.client.listTools();
   for (const tool of new Set(wiring.map(line => line.split(" ")[2]))) assert.ok(tools.some(candidate => candidate.name === tool), tool);
+});
+
+test("the committed server bundle serves the tools over stdio and exits when Claude Code closes it", async () => {
+  const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "cpp-lsp-stdio-")));
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [resolve(here, "..", "plugins", "cpp-lsp", "server", "server.mjs")],
+    env: { ...process.env as Record<string, string>, CLAUDE_PROJECT_DIR: projectDir, CLAUDE_PLUGIN_DATA: dataDir() },
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await client.connect(transport);
+  const { tools } = await client.listTools();
+  assert.deepEqual(tools.map(tool => tool.name), [...TOOLS_2_0_0, "cpp_preset", ...HOOK_TOOLS]);
+  assert.match(client.getInstructions()!, /C\/C\+\+ tools from the cpp-lsp plugin/);
+  const pid = transport.pid!;
+  await client.close();
+  const deadline = Date.now() + 10_000;
+  const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  while (alive() && Date.now() < deadline) await new Promise(done => setTimeout(done, 50));
+  assert.ok(!alive(), "the server exited");
 });
