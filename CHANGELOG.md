@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The C/C++ logic moved into a shared core package, `packages/core`, which the pi extension and the Claude Code plugin both use. The pi extension behaves as before.
 
+### Fixed
+
+- `cpp_rename`'s build check no longer says "no errors" when a compile was cut off at the check's time limit a moment before the clock reached it. It now says that not every file was checked, as it does for any file the check did not reach.
+
 ## [2.0.0] - 2026-11-04
 
 ### Added

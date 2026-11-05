@@ -188,7 +188,8 @@ export interface CompilerCheckOptions {
   entries?: Map<string, CompilationEntry>;
 }
 
-export type CompilerCheck = { ok: true; problems: CompilerProblem[] } | { ok: false; reason: string };
+/** Not ok with `timedOut` when the compiler was stopped at the time limit. */
+export type CompilerCheck = { ok: true; problems: CompilerProblem[] } | { ok: false; reason: string; timedOut?: true };
 
 /** The flags that make the profile's compiler print one plain line per diagnostic. */
 function plainOutputFlags(profile: TargetProfile): string[] {
@@ -226,7 +227,7 @@ export async function checkWithCompiler(file: string, profile: TargetProfile, op
   try {
     const { compiler, args, cwd } = compilerInvocation(file, profile, options);
     const result = await options.exec(compiler, args, { cwd, timeout: timeoutMs });
-    if (result.killed) return { ok: false, reason: `it did not finish within ${Math.round(timeoutMs / 100) / 10}s` };
+    if (result.killed) return { ok: false, reason: `it did not finish within ${Math.round(timeoutMs / 100) / 10}s`, timedOut: true };
     const output = `${result.stderr}\n${result.stdout}`;
     const problems = parseCompilerOutput(output, cwd);
     // A failing run with no error line never got to the file, e.g. an unknown flag or a missing compiler.

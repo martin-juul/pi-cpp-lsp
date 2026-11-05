@@ -114,9 +114,13 @@ async function buildCheck(model: ProjectModel, targets: TargetProfile[], changed
   await mapLimited(jobs, RENAME_CHECK_CONCURRENCY, async ({ file, profile }) => {
     const remaining = deadline - Date.now();
     if (remaining <= 0) { unchecked.add(profile.target); return; }
+    // Below the compiler's own limit, the time left is what stops this compile.
+    const cutByLimit = remaining < COMPILER_CHECK_TIMEOUT_MS;
     const result = await checkWithCompiler(file, profile, { exec: options.exec, cwd: options.cwd, buildDir: model.buildDir, entries, timeoutMs: Math.min(COMPILER_CHECK_TIMEOUT_MS, remaining) });
     // A compile cut off by the overall limit was not reached; any other failure is the file's verdict.
-    if (!result.ok && Date.now() >= deadline) unchecked.add(profile.target);
+    // A timer may fire a moment before the clock reaches the deadline, so a stop at the time left
+    // counts as cut off whatever the clock says.
+    if (!result.ok && (Date.now() >= deadline || (cutByLimit && result.timedOut))) unchecked.add(profile.target);
     else results.set(file, result);
   });
   const broken = [...results.values()].some(result => result.ok && result.problems.some(problem => problem.severity === "error"));

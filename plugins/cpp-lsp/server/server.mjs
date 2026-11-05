@@ -26765,7 +26765,7 @@ async function checkWithCompiler(file, profile, options) {
   try {
     const { compiler, args, cwd } = compilerInvocation(file, profile, options);
     const result = await options.exec(compiler, args, { cwd, timeout: timeoutMs });
-    if (result.killed) return { ok: false, reason: `it did not finish within ${Math.round(timeoutMs / 100) / 10}s` };
+    if (result.killed) return { ok: false, reason: `it did not finish within ${Math.round(timeoutMs / 100) / 10}s`, timedOut: true };
     const output = `${result.stderr}
 ${result.stdout}`;
     const problems = parseCompilerOutput(output, cwd);
@@ -26909,8 +26909,9 @@ async function buildCheck(model, targets, changed, toolchain, options) {
       unchecked.add(profile.target);
       return;
     }
+    const cutByLimit = remaining < COMPILER_CHECK_TIMEOUT_MS;
     const result = await checkWithCompiler(file, profile, { exec: options.exec, cwd: options.cwd, buildDir: model.buildDir, entries, timeoutMs: Math.min(COMPILER_CHECK_TIMEOUT_MS, remaining) });
-    if (!result.ok && Date.now() >= deadline) unchecked.add(profile.target);
+    if (!result.ok && (Date.now() >= deadline || cutByLimit && result.timedOut)) unchecked.add(profile.target);
     else results.set(file, result);
   });
   const broken = [...results.values()].some((result) => result.ok && result.problems.some((problem) => problem.severity === "error"));
